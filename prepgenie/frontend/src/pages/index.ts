@@ -1,0 +1,9 @@
+export { default as SyllabusPage } from './SyllabusPage';
+export { default as StudyPlanPage } from './StudyPlanPage';
+export { default as ProgressPage } from './ProgressPage';
+export { default as DashboardPage } from './DashboardPage';
+export { default as LoginPage } from './LoginPage';
+export { default as RegisterPage } from './RegisterPage';
+export { default as PYQSearchPage } from './PYQSearchPage';
+export { default as AnswersPage } from './AnswersPage';
+export { default as ChatPage } from './ChatPage';

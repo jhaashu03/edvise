@@ -1,0 +1,261 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Environment variables - CRITICAL: Exclude all environment files
+.env
+.env.*
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+*.env
+.env.local
+.env.production
+.env.staging
+.env.development
+
+# API Keys and Secrets - CRITICAL: Never commit these
+*api_key*
+*secret*
+*token*
+*password*
+*credentials*
+*.pem
+*.key
+*.p12
+*.pfx
+config_secrets.py
+secrets.py
+private_config.py
+
+# Database files and connection strings
+*.db
+*.sqlite
+*.sqlite3
+milvus_lite_local.db
+prepgenie_local.db
+database.ini
+db_config.py
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.sublime-project
+.sublime-workspace
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+server.log
+debug.log
+error.log
+access.log
+
+# Uploads directory (contains user data)
+uploads/
+upload/
+media/
+static/media/
+
+# Node modules (for frontend)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Build outputs
+prepgenie/frontend/build/
+prepgenie/frontend/dist/
+prepgenie/backend/dist/
+
+# Environment files
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.template
+
+# CRITICAL: Configuration files with hardcoded secrets
+prepgenie/backend/app/core/config.py
+**/config.py
+
+# API keys and secrets
+*api_key*
+*secret*
+*token*
+*password*
+*private_key*
+*credentials*
+*.pem
+*.key
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+milvus_lite_local.db
+prepgenie_local.db
+
+# Logs
+*.log
+server.log
+
+# Upload directories
+uploads/
+**/uploads/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Node modules
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Package files
+*.tgz
+*.tar.gz
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage/
+*.lcov
+
+# Dependency directories
+jspm_packages/
+
+# Optional eslint cache
+.eslintcache
+
+# Temporary files
+*.tmp
+*.temp
+.temporary/
+tmp/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# PEP 582
+__pypackages__/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
