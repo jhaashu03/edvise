@@ -74,6 +74,12 @@ config_secrets.py
 secrets.py
 private_config.py
 
+# Specific sensitive files found in codebase
+backend/app/core/config.py
+validate_milvus_credentials.py
+validate_milvus_connection.py
+**/config.py
+
 # Database files and connection strings
 *.db
 *.sqlite
@@ -259,3 +265,24 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+# CRITICAL SECURITY: Prevent committing sensitive files
+prepgenie/backend/.env
+prepgenie/frontend/.env
+prepgenie/backend/app/core/config.py
+
+# Configuration files that may contain secrets
+**/config.py
+**/settings.py  
+**/secrets.py
+**/*secret*
+**/*key*
+**/*password*
+**/*token*
+**/*credential*
+
+# Prevent accidental commits of files with API keys
+*openai*
+*walmart*
+*milvus*
+*zilliz*

@@ -5,6 +5,7 @@ Unified LLM Service supporting both OpenAI and Walmart LLM Gateway
 import asyncio
 import json
 import logging
+import os
 import time
 import hashlib
 import hmac
@@ -282,7 +283,7 @@ class WalmartLLMGatewayProvider:
                 "X-Api-Key": self.api_key,
                 "Content-Type": "application/json",
                 "User-Agent": "PrepGenie/1.0",
-                "WM_CONSUMER.ID": "aff5571e-8fa9-4cb3-9981-eb361e4ff53e",  # Required for routing
+                "WM_CONSUMER.ID": os.getenv("WALMART_CONSUMER_ID", ""),  # Required for routing
                 "WM_SVC.NAME": "WMTLLMGATEWAY", 
                 "WM_SVC.ENV": self.svc_env,
                 "X-UPSTREAM": "WMTLLMGATEWAY.GenAI.Api",
