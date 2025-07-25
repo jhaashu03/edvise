@@ -909,11 +909,6 @@ async def upload_answer(
         logger.error(f"NEW_VERSION_UPLOAD_ERROR: {e}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
-@router.get("/debug-test")
-def debug_test():
-    """Debug test endpoint"""
-    return {"message": "NEW CODE IS WORKING!", "timestamp": "2025-07-18T17:00:00"}
-
 @router.get("/me")
 def get_my_answers(
     current_user: User = Depends(get_current_user),
