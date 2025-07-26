@@ -964,6 +964,8 @@ You are analyzing a **HANDWRITTEN UPSC Civil Services Mains exam answer booklet*
                 word_limit = qa.get("word_limit") or 150
                 time_limit = (word_limit // 10) if word_limit and word_limit > 0 else 15  # Default to 15 minutes
                 
+                question_num = qa.get('question_number', f'Q{current_question}')
+                
                 comprehensive_analysis = await comprehensive_question_analysis_direct(
                     question=question_text,
                     student_answer=student_answer,
@@ -973,7 +975,8 @@ You are analyzing a **HANDWRITTEN UPSC Civil Services Mains exam answer booklet*
                         "word_limit": word_limit,
                         "exam_type": "UPSC Mains"
                     },
-                    llm_service=self.llm_service
+                    llm_service=self.llm_service,
+                    question_number=question_num  # Pass question number for better logging
                 )
                 
                 # Step 2: Detailed Answer Evaluation

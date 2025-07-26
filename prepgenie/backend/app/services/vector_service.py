@@ -42,7 +42,9 @@ class VectorService:
             return
         
         # Determine if we're using local or remote Milvus
-        self.use_local = getattr(settings, 'ENVIRONMENT', 'production') == 'local'
+        # Support both 'local' and 'development' environments for local Milvus
+        environment = getattr(settings, 'ENVIRONMENT', 'production').lower()
+        self.use_local = environment in ['local', 'development']
         
         # Get the appropriate connection details based on environment
         if self.use_local:
@@ -55,7 +57,7 @@ class VectorService:
             logger.info("Using Zilliz Cloud for vector storage")
 
     async def connect(self):
-        """Connect to Milvus (local or remote)"""
+        """Connect to Milvus (local or remote) using shared connection"""
         try:
             # Check if vector service is disabled
             if getattr(settings, 'DISABLE_VECTOR_SERVICE', False):
@@ -63,33 +65,20 @@ class VectorService:
                 return
                 
             if not self._connected:
-                if self.use_local:
-                    # Use Milvus Lite for local development
-                    logger.info("Using Milvus Lite for local development")
-                    connections.connect(
-                        alias=self.connection_alias,
-                        uri=os.path.abspath(self.local_db_path)
-                    )
-                    logger.info(f"Successfully connected to Milvus Lite at {self.local_db_path}")
+                # Use shared connection manager to prevent file locking
+                from app.services.shared_vector_connection import shared_connection
+                
+                shared_alias = await shared_connection.get_connection()
+                if shared_alias:
+                    self.connection_alias = shared_alias
+                    self._connected = True
+                    logger.info(f"✅ Using shared connection for main vector service: {shared_alias}")
+                    
+                    # Initialize collection
+                    await self._ensure_collection_exists()
                 else:
-                    # Use Zilliz Cloud for production
-                    logger.info("Using Zilliz Cloud for production")
-                    
-                    # Validate that we have proper cloud credentials
-                    if not settings.MILVUS_URI or not settings.MILVUS_TOKEN:
-                        raise ValueError("MILVUS_URI and MILVUS_TOKEN must be set for production mode")
-                    
-                    connections.connect(
-                        alias=self.connection_alias,
-                        uri=settings.MILVUS_URI,
-                        token=settings.MILVUS_TOKEN
-                    )
-                    logger.info("Successfully connected to Zilliz Cloud")
-                
-                self._connected = True
-                
-                # Initialize collection
-                await self._ensure_collection_exists()
+                    logger.error("❌ Failed to get shared vector connection")
+                    raise ConnectionError("Could not establish shared vector connection")
                 
         except Exception as e:
             if self.use_local:
@@ -114,7 +103,7 @@ class VectorService:
         """Create collection if it doesn't exist"""
         try:
             logger.info(f"Checking if collection '{self.collection_name}' exists...")
-            if not utility.has_collection(self.collection_name):
+            if not utility.has_collection(self.collection_name, using=self.connection_alias):
                 logger.info(f"Collection '{self.collection_name}' does not exist, creating...")
                 # Define collection schema
                 fields = [
@@ -135,7 +124,11 @@ class VectorService:
                     description="PYQ embeddings for semantic search"
                 )
                 
-                collection = Collection(self.collection_name, schema)
+                collection = Collection(
+                    name=self.collection_name, 
+                    schema=schema, 
+                    using=self.connection_alias
+                )
                 
                 # Create index
                 index_params = {
@@ -150,7 +143,7 @@ class VectorService:
                 logger.info(f"Collection '{self.collection_name}' already exists")
             
             # Load the collection
-            self._collection = Collection(self.collection_name)
+            self._collection = Collection(self.collection_name, using=self.connection_alias)
             self._collection.load()
             logger.info(f"Collection {self.collection_name} loaded successfully. Collection object: {self._collection}")
             

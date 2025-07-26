@@ -495,10 +495,46 @@ async def comprehensive_question_analysis(
     llm_service: LLMService = Depends(get_llm_service)
 ):
     """
-    Multi-dimensional question analysis covering all aspects discussed in the agentic approach
+    Enhanced 14-dimensional question analysis including topper comparison
     """
     try:
-        comprehensive_prompt = f"""You are an expert UPSC question analysis system. Provide a comprehensive, multi-dimensional analysis of this question.
+        # Use the enhanced comprehensive analysis with topper comparison
+        logger.info(f"🚀 Starting 14-dimensional analysis for question: {question[:50]}...")
+        
+        # Create exam context for the analysis
+        exam_context = {
+            "marks": 15,
+            "time_limit": 20,
+            "word_limit": 250,
+            "analysis_depth": analysis_depth,
+            "student_level": student_level
+        }
+        
+        # Call the enhanced analysis function directly
+        result = await comprehensive_question_analysis_direct(
+            question=question,
+            student_answer="",  # No student answer for question analysis
+            exam_context=exam_context,
+            llm_service=llm_service
+        )
+        
+        if result.get("success"):
+            return {
+                "question": question,
+                "comprehensive_analysis": result.get("analysis", {}),
+                "analysis_metadata": {
+                    "analysis_depth": analysis_depth,
+                    "student_level": student_level,
+                    "provider": result.get("provider", llm_service.provider_name),
+                    "topper_comparison_included": result.get("topper_comparison_included", False),
+                    "dimensions_analyzed": result.get("dimensions_analyzed", 14),
+                    "timestamp": "2025-07-14"
+                }
+            }
+        else:
+            # Fallback to basic analysis
+            logger.warning("Enhanced analysis failed, using fallback...")
+            comprehensive_prompt = f"""You are an expert UPSC question analysis system. Provide a comprehensive, multi-dimensional analysis of this question.
 
 Question: {question}
 
@@ -587,29 +623,32 @@ Provide analysis in this JSON format covering all 13 analytical dimensions:
 
 Be specific and actionable in all suggestions."""
 
-        response = await llm_service.simple_chat(
-            user_message=comprehensive_prompt,
-            temperature=0.3,
-            max_tokens=8000  # Increased from 4000 to 8000 for complete evaluations
-        )
-        
-        # Try to parse JSON, fallback to structured text if needed
-        import json
-        try:
-            analysis_data = json.loads(response)
-        except:
-            analysis_data = {"raw_analysis": response}
-        
-        return {
-            "question": question,
-            "comprehensive_analysis": analysis_data,
-            "analysis_metadata": {
-                "analysis_depth": analysis_depth,
-                "student_level": student_level,
-                "provider": llm_service.provider_name,
-                "timestamp": "2025-07-14"
+            response = await llm_service.simple_chat(
+                user_message=comprehensive_prompt,
+                temperature=0.3,
+                max_tokens=8000
+            )
+            
+            # Try to parse JSON, fallback to structured text if needed
+            import json
+            try:
+                analysis_data = json.loads(response)
+            except:
+                analysis_data = {"raw_analysis": response}
+            
+            return {
+                "question": question,
+                "comprehensive_analysis": analysis_data,
+                "analysis_metadata": {
+                    "analysis_depth": analysis_depth,
+                    "student_level": student_level,
+                    "provider": llm_service.provider_name,
+                    "topper_comparison_included": False,
+                    "dimensions_analyzed": 13,
+                    "timestamp": "2025-07-14",
+                    "note": "Fallback to 13D analysis - enhanced analysis failed"
+                }
             }
-        }
         
     except LLMServiceError as e:
         logger.error(f"LLM service error in comprehensive analysis: {e}")
@@ -624,12 +663,17 @@ async def comprehensive_question_analysis_direct(
     question: str,
     student_answer: str = "",
     exam_context: dict = None,
-    llm_service: LLMService = None
+    llm_service: LLMService = None,
+    question_number: str = None  # Add question number parameter
 ) -> dict:
     """
     Enhanced comprehensive question analysis with actual topper comparison via vector similarity
     Returns structured analysis with real topper examples and feedback
     """
+    # Extract question number for logging if not provided
+    if not question_number:
+        question_number = exam_context.get('question_number', 'Unknown') if exam_context else 'Unknown'
+    
     if not llm_service:
         llm_service = get_llm_service()
     
@@ -643,7 +687,7 @@ async def comprehensive_question_analysis_direct(
     
     try:
         # Use the enhanced comprehensive analysis that includes real topper comparison
-        logger.info(f"Starting enhanced comprehensive analysis for question: {question[:50]}...")
+        logger.info(f"Starting enhanced comprehensive analysis for {question_number}: {question[:50]}...")
         
         result = await enhanced_comprehensive_analysis_with_topper_comparison(
             question=question,
@@ -653,29 +697,38 @@ async def comprehensive_question_analysis_direct(
         )
         
         if result.get("success"):
-            logger.info("Enhanced comprehensive analysis completed successfully with topper comparison")
+            logger.info(f"✅ Enhanced comprehensive analysis completed successfully for {question_number} with topper comparison")
             return result
         else:
-            logger.warning("Enhanced analysis failed, falling back to standard analysis")
+            logger.warning(f"⚠️ Enhanced analysis failed for {question_number}, falling back to standard analysis")
+            logger.warning(f"🔍 FALLBACK REASON for {question_number}: Enhanced analysis returned success=False. Error: {result.get('error', 'Unknown error')}")
             # Fall back to original implementation if enhanced version fails
-            return await _fallback_comprehensive_analysis(question, student_answer, exam_context, llm_service)
+            return await _fallback_comprehensive_analysis(question, student_answer, exam_context, llm_service, question_number)
             
     except Exception as e:
-        logger.error(f"Error in enhanced comprehensive analysis: {e}")
+        logger.error(f"❌ ERROR in enhanced comprehensive analysis for {question_number}: {e}")
+        logger.error(f"🔍 FALLBACK REASON for {question_number}: Exception occurred - {type(e).__name__}: {str(e)}")
         # Fall back to original implementation on any error
-        return await _fallback_comprehensive_analysis(question, student_answer, exam_context, llm_service)
+        return await _fallback_comprehensive_analysis(question, student_answer, exam_context, llm_service, question_number)
 
 
 async def _fallback_comprehensive_analysis(
     question: str,
     student_answer: str = "",
     exam_context: dict = None,
-    llm_service: LLMService = None
+    llm_service: LLMService = None,
+    question_number: str = None
 ) -> dict:
     """
     Original comprehensive question analysis implementation (fallback)
     Returns structured analysis without FastAPI endpoint overhead
     """
+    if not question_number:
+        question_number = "Unknown"
+        
+    logger.warning(f"🚨 GIVING FALLBACK RESPONSE FOR {question_number}: {question[:50]}...")
+    logger.warning(f"📋 FALLBACK ANALYSIS for {question_number} - Using standard 13-dimensional evaluation without topper comparison")
+    
     if not llm_service:
         llm_service = get_llm_service()
     

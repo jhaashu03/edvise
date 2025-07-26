@@ -115,7 +115,7 @@ Analyze this topper's answer and extract key patterns in JSON format:
         """
         
         # Define minimum similarity threshold for meaningful comparison
-        MIN_SIMILARITY_THRESHOLD = 0.50  # Only use if similarity > 50% (high-quality matches only)
+        MIN_SIMILARITY_THRESHOLD = 0.30  # Temporarily lowered from 0.50 to allow more topper comparisons (was rejecting all matches)
         
         try:
             # Ensure vector service is connected
@@ -155,16 +155,20 @@ Analyze this topper's answer and extract key patterns in JSON format:
                 else:
                     # No high-quality matches found
                     best_similarity = similar_toppers[0].get('similarity_score', 0)
-                    logger.info(f"No high-quality matches found. Best similarity: {best_similarity:.3f} (below {MIN_SIMILARITY_THRESHOLD})")
-                    logger.info("🚫 Skipping 14th dimension - no contextually relevant topper data")
+                    logger.warning(f"🚨 No high-quality topper matches found")
+                    logger.warning(f"🔍 Best similarity: {best_similarity:.3f} (below threshold {MIN_SIMILARITY_THRESHOLD})")
+                    logger.warning("🚫 Skipping 14th dimension - no contextually relevant topper data")
+                    logger.warning(f"GIVING FALLBACK RESPONSE FOR QUES - Best match similarity {best_similarity:.3f} < {MIN_SIMILARITY_THRESHOLD}")
                     return None
             else:
-                logger.info("🚫 No vector search results - skipping 14th dimension")
+                logger.warning("� Vector search found no results")
+                logger.warning("🚫 Skipping 14th dimension - no vector search results")
+                logger.warning("GIVING FALLBACK RESPONSE FOR QUES - Vector search returned 0 results")
                 return None
                 
         except Exception as e:
-            logger.error(f"Error in vector search: {e}")
-            logger.info("🚫 Vector search failed - skipping 14th dimension")
+            logger.error(f"🚨 Vector search failed: {e}")
+            logger.warning("🚫 Skipping 14th dimension - vector search error")
             return None
 
     async def _generate_contextual_comparison(self,

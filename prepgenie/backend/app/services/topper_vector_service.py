@@ -39,7 +39,9 @@ class TopperVectorService:
         self._pattern_collection = None
         
         # Use same local/remote logic as main vector service  
-        self.use_local = getattr(settings, 'ENVIRONMENT', 'production') == 'local'
+        # Check if we should use local Milvus (development or local environment)
+        environment = getattr(settings, 'ENVIRONMENT', 'production').lower()
+        self.use_local = environment in ['local', 'development']
         if self.use_local:
             self.local_db_path = getattr(settings, 'MILVUS_LOCAL_PATH', './milvus_lite_local.db')
         else:
@@ -79,127 +81,139 @@ class TopperVectorService:
             return False
 
     async def connect(self):
-        """Connect to Milvus for topper search"""
+        """Connect to Milvus for topper search using shared connection"""
         try:
             if getattr(settings, 'DISABLE_VECTOR_SERVICE', False):
                 logger.info("Vector service disabled, skipping topper vector connection")
                 return
                 
             if not self._connected:
-                if self.use_local:
-                    connections.connect(
-                        alias=self.connection_alias,
-                        uri=os.path.abspath(self.local_db_path)
-                    )
-                    logger.info(f"Connected to Milvus Lite for topper search: {self.local_db_path}")
-                else:
-                    if not settings.MILVUS_URI or not settings.MILVUS_TOKEN:
-                        raise ValueError("MILVUS_URI and MILVUS_TOKEN required for production")
-                    
-                    connections.connect(
-                        alias=self.connection_alias,
-                        uri=settings.MILVUS_URI,
-                        token=settings.MILVUS_TOKEN
-                    )
-                    logger.info("Connected to Zilliz Cloud for topper search")
+                # Use shared connection manager to prevent file locking
+                from app.services.shared_vector_connection import shared_connection
                 
-                self._connected = True
-                await self._ensure_collections_exist()
+                shared_alias = await shared_connection.get_connection()
+                if shared_alias:
+                    self.connection_alias = shared_alias
+                    self._connected = True
+                    logger.info(f"✅ Using shared connection for topper vector service: {shared_alias}")
+                    self._ensure_collections_exist()  # Remove await since this is not an async method
+                else:
+                    logger.error("❌ Failed to get shared vector connection")
+                    raise ConnectionError("Could not establish shared vector connection")
                 
         except Exception as e:
             logger.error(f"Failed to connect topper vector service: {e}")
             raise
 
-    async def _ensure_collections_exist(self):
-        """Create topper collections if they don't exist"""
+    def _ensure_collections_exist(self):
+        """Ensure both topper collections exist and are properly loaded"""
         try:
-            # Create topper answers collection
-            if not utility.has_collection(self.collection_name, using=self.connection_alias):
-                logger.info(f"Creating topper collection: {self.collection_name}")
-                
-                fields = [
-                    FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
-                    FieldSchema(name="topper_id", dtype=DataType.INT64),
-                    FieldSchema(name="topper_name", dtype=DataType.VARCHAR, max_length=200),
-                    FieldSchema(name="institute", dtype=DataType.VARCHAR, max_length=200),
-                    FieldSchema(name="rank", dtype=DataType.INT64),
-                    FieldSchema(name="exam_year", dtype=DataType.INT64),
-                    FieldSchema(name="question_id", dtype=DataType.VARCHAR, max_length=100),
-                    FieldSchema(name="question_text", dtype=DataType.VARCHAR, max_length=65535),
-                    FieldSchema(name="subject", dtype=DataType.VARCHAR, max_length=100),
-                    FieldSchema(name="topic", dtype=DataType.VARCHAR, max_length=200),
-                    FieldSchema(name="marks", dtype=DataType.INT64),
-                    FieldSchema(name="answer_text", dtype=DataType.VARCHAR, max_length=65535),
-                    FieldSchema(name="word_count", dtype=DataType.INT64),
-                    FieldSchema(name="source_document", dtype=DataType.VARCHAR, max_length=500),
-                    FieldSchema(name="page_number", dtype=DataType.INT64),
-                    FieldSchema(name="created_at", dtype=DataType.VARCHAR, max_length=50),
-                    FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=self.dimension)
-                ]
-                
-                schema = CollectionSchema(
-                    fields=fields,
-                    description="Topper answer embeddings for similarity search"
-                )
-                
-                collection = Collection(
-                    name=self.collection_name,
-                    schema=schema,
-                    using=self.connection_alias
-                )
-                
-                # Create index for efficient search
-                index_params = {
-                    "metric_type": "COSINE",
-                    "index_type": "IVF_FLAT",
-                    "params": {"nlist": 1024}
-                }
-                collection.create_index("embedding", index_params)
-                logger.info(f"Created topper collection with index: {self.collection_name}")
+            # Check for existing topper_embeddings collection first
+            collections = utility.list_collections(using=self.connection_alias)
+            logger.info(f"Available collections: {collections}")
             
-            # Create topper patterns collection  
-            if not utility.has_collection(self.pattern_collection_name, using=self.connection_alias):
-                logger.info(f"Creating pattern collection: {self.pattern_collection_name}")
+            if "topper_embeddings" in collections:
+                logger.info("Loading existing collection: topper_embeddings")
                 
-                pattern_fields = [
-                    FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
-                    FieldSchema(name="pattern_id", dtype=DataType.INT64),
-                    FieldSchema(name="pattern_type", dtype=DataType.VARCHAR, max_length=100),
-                    FieldSchema(name="pattern_name", dtype=DataType.VARCHAR, max_length=200),
-                    FieldSchema(name="description", dtype=DataType.VARCHAR, max_length=65535),
-                    FieldSchema(name="subjects", dtype=DataType.VARCHAR, max_length=1000),
-                    FieldSchema(name="question_types", dtype=DataType.VARCHAR, max_length=1000),
-                    FieldSchema(name="frequency", dtype=DataType.FLOAT),
-                    FieldSchema(name="effectiveness_score", dtype=DataType.FLOAT),
-                    FieldSchema(name="examples", dtype=DataType.VARCHAR, max_length=65535),
-                    FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=self.dimension)
-                ]
+                # Create connection to the topper_embeddings collection
+                self._topper_collection = Collection("topper_embeddings", using=self.connection_alias)
                 
-                pattern_schema = CollectionSchema(
-                    fields=pattern_fields,
-                    description="Topper writing patterns for analysis"
-                )
+                # Legacy property for backward compatibility
+                self.topper_collection = self._topper_collection
                 
-                pattern_collection = Collection(
-                    name=self.pattern_collection_name,
-                    schema=pattern_schema,
-                    using=self.connection_alias
-                )
+                # Force load to ensure fresh data
+                try:
+                    self._topper_collection.load()
+                except Exception as e:
+                    logger.warning(f"Collection load warning: {e}")
                 
-                pattern_collection.create_index("embedding", index_params)
-                logger.info(f"Created pattern collection with index: {self.pattern_collection_name}")
-            
-            # Load collections
-            self._topper_collection = Collection(self.collection_name, using=self.connection_alias)
-            self._pattern_collection = Collection(self.pattern_collection_name, using=self.connection_alias)
-            
-            self._topper_collection.load()
-            self._pattern_collection.load()
-            
-            logger.info("Topper vector collections loaded successfully")
-            
+                # Get REAL entity count by forcing a fresh query
+                try:
+                    # Use query to get actual count since num_entities might be cached
+                    count_results = self._topper_collection.query(
+                        expr="topper_id >= 0",
+                        output_fields=["topper_id"],
+                        limit=1000  # Get a large number to count
+                    )
+                    entity_count = len(count_results)
+                    logger.info(f"Real collection entity count (via query): {entity_count}")
+                except Exception as e:
+                    entity_count = self._topper_collection.num_entities
+                    logger.info(f"Collection entity count (via num_entities): {entity_count}")
+                
+                schema_fields = [f.name for f in self._topper_collection.schema.fields]
+                logger.info(f"Collection schema fields: {schema_fields}")
+                logger.info(f"Collection name from object: {self._topper_collection.name}")
+                
+                # Validate the schema has the expected fields
+                if 'question_text' in schema_fields and 'answer_text' in schema_fields:
+                    logger.info("✅ Using existing topper_embeddings collection with correct schema")
+                    if entity_count == 0:
+                        logger.warning("⚠️ Collection has correct schema but is empty")
+                else:
+                    logger.error(f"⚠️ Collection has unexpected schema! Fields: {schema_fields}")
+                    logger.error("Expected 'question_text' and 'answer_text' fields")
+                    raise ValueError("Wrong collection schema")
+            else:
+                logger.info("topper_embeddings collection not found - creating new collection")
+                self._create_topper_collection()
+                self._topper_collection = Collection("topper_embeddings", using=self.connection_alias)
+                self.topper_collection = self._topper_collection
+                logger.info("✅ Created new topper_embeddings collection with correct schema")
+                
         except Exception as e:
-            logger.error(f"Failed to ensure topper collections exist: {e}")
+            logger.error(f"Error ensuring collections exist: {e}")
+            raise
+
+    def _create_topper_collection(self):
+        """Create topper_embeddings collection with proper schema"""
+        try:
+            # Define collection schema
+            fields = [
+                FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
+                FieldSchema(name="topper_id", dtype=DataType.INT64),
+                FieldSchema(name="topper_name", dtype=DataType.VARCHAR, max_length=100),
+                FieldSchema(name="institute", dtype=DataType.VARCHAR, max_length=100),
+                FieldSchema(name="rank", dtype=DataType.INT64),
+                FieldSchema(name="exam_year", dtype=DataType.INT64),
+                FieldSchema(name="question_id", dtype=DataType.VARCHAR, max_length=50),
+                FieldSchema(name="question_text", dtype=DataType.VARCHAR, max_length=5000),
+                FieldSchema(name="subject", dtype=DataType.VARCHAR, max_length=100),
+                FieldSchema(name="topic", dtype=DataType.VARCHAR, max_length=200),
+                FieldSchema(name="marks", dtype=DataType.INT64),
+                FieldSchema(name="answer_text", dtype=DataType.VARCHAR, max_length=10000),
+                FieldSchema(name="word_count", dtype=DataType.INT64),
+                FieldSchema(name="source_document", dtype=DataType.VARCHAR, max_length=200),
+                FieldSchema(name="page_number", dtype=DataType.INT64),
+                FieldSchema(name="created_at", dtype=DataType.VARCHAR, max_length=50),
+                FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=self.dimension)
+            ]
+
+            schema = CollectionSchema(
+                fields=fields,
+                description="Topper answer embeddings for semantic search",
+                enable_dynamic_field=False
+            )
+
+            # Create collection
+            collection = Collection(
+                name="topper_embeddings",
+                schema=schema, 
+                using=self.connection_alias
+            )
+
+            # Create index
+            index_params = {
+                "metric_type": "COSINE",
+                "index_type": "IVF_FLAT",
+                "params": {"nlist": 1024}
+            }
+            collection.create_index(field_name="embedding", index_params=index_params)
+            
+            logger.info("Created topper collection with index: topper_embeddings")
+
+        except Exception as e:
+            logger.error(f"Failed to create topper collection: {e}")
             raise
 
     def generate_embedding(self, text: str) -> List[float]:
@@ -348,13 +362,21 @@ class TopperVectorService:
                 "params": {"nprobe": 10}
             }
             
-            # Output fields
+            # Output fields - match actual topper_embeddings collection schema  
             output_fields = [
                 "topper_id", "topper_name", "institute", "rank", "exam_year",
-                "question_id", "question_text", "subject", "topic", "marks",
-                "answer_text", "word_count", "source_document", "page_number"
+                "question_id", "question_text", "answer_text", "subject", "topic", "marks", 
+                "word_count", "source_document", "page_number"
             ]
             
+            # Check collection status before search
+            try:
+                entity_count = self._topper_collection.num_entities
+                logger.info(f"🔍 Searching collection '{self.collection_name}' with {entity_count} total entities")
+                logger.info(f"📊 Search params - Limit: {limit}, Filter: {filter_expr or 'None'}")
+            except Exception as e:
+                logger.warning(f"Could not check collection entity count: {e}")
+
             # Perform search
             results = self._topper_collection.search(
                 data=[query_embedding],
@@ -365,31 +387,55 @@ class TopperVectorService:
                 output_fields=output_fields
             )
             
+            logger.info(f"🔎 Raw search results: {len(results)} result sets returned")
+            
             # Format results
             formatted_results = []
-            for hits in results:
-                for hit in hits:
+            for result_set_idx, hits in enumerate(results):
+                logger.info(f"📝 Processing result set {result_set_idx + 1} with {len(hits)} hits")
+                for hit_idx, hit in enumerate(hits):
                     result_data = {
                         "topper_id": hit.entity.get("topper_id"),
                         "topper_name": hit.entity.get("topper_name"),
                         "institute": hit.entity.get("institute"),
-                        "rank": hit.entity.get("rank"),
+                        "rank": hit.entity.get("rank"),  # Map to rank for consistency
                         "exam_year": hit.entity.get("exam_year"),
-                        "question_id": hit.entity.get("question_id"),
-                        "question_text": hit.entity.get("question_text"),
+                        "question_id": hit.entity.get("question_id"),  # Use question_id field
+                        "question_text": hit.entity.get("question_text"),  # Use correct field name
                         "subject": hit.entity.get("subject"),
-                        "topic": hit.entity.get("topic"),
+                        "topic": hit.entity.get("subject"),  # Use subject as topic for now
                         "marks": hit.entity.get("marks"),
-                        "answer_text": hit.entity.get("answer_text"),
-                        "word_count": hit.entity.get("word_count"),
-                        "source_document": hit.entity.get("source_document"),
-                        "page_number": hit.entity.get("page_number"),
+                        "answer_text": hit.entity.get("answer_text"),  # Use correct field name
+                        "word_count": len(hit.entity.get("answer_text", "").split()) if hit.entity.get("answer_text") else 0,
+                        "source_document": f"Topper {hit.entity.get('topper_name', 'Unknown')}",
+                        "page_number": 1,  # Default page number
                         "similarity_score": hit.score,
                         "relevance_rank": len(formatted_results) + 1
                     }
                     formatted_results.append(result_data)
+                    # Log individual similarity scores for debugging
+                    logger.info(f"🎯 Result {len(formatted_results)}: [{hit.entity.get('topper_name')}] Q{hit.entity.get('question_id')} - Similarity: {hit.score:.4f}")
             
-            logger.info(f"Found {len(formatted_results)} similar topper answers")
+            if len(formatted_results) == 0:
+                logger.warning(f"❌ Vector search returned 0 results for query: '{query_question[:100]}...'")
+                logger.warning(f"🔍 Search parameters - Limit: {limit}, Filter: {filter_expr or 'None'}")
+                # Enhanced collection diagnostics
+                try:
+                    entity_count = self._topper_collection.num_entities
+                    logger.warning(f"📊 Collection '{self.collection_name}' contains {entity_count} total entities")
+                    if entity_count == 0:
+                        logger.error("🚨 CRITICAL: Vector database is empty! No topper data found.")
+                        logger.error("💡 Solution: Run topper processing pipeline to populate database")
+                    else:
+                        logger.warning(f"🤔 Database has {entity_count} entities but search returned 0 results")
+                        logger.warning("💡 Possible issues: Filter too restrictive, similarity threshold too high, or embedding mismatch")
+                except Exception as e:
+                    logger.error(f"❌ Could not check collection diagnostics: {e}")
+            else:
+                logger.info(f"✅ Found {len(formatted_results)} similar topper answers")
+                scores_list = [f"{r['similarity_score']:.4f}" for r in formatted_results[:3]]
+                logger.info(f"📊 Top similarity scores: {scores_list}")
+            
             return formatted_results
             
         except Exception as e:

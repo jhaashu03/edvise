@@ -18,7 +18,8 @@ async def enhanced_comprehensive_analysis_with_topper_comparison(
     student_answer: str = "",
     exam_context: dict = None,
     llm_service: LLMService = None,
-    db: Session = None
+    db: Session = None,
+    question_number: int = None
 ) -> dict:
     """
     Enhanced 14-dimensional analysis including topper comparison
@@ -74,7 +75,10 @@ async def enhanced_comprehensive_analysis_with_topper_comparison(
             
             # Check if we have a meaningful topper comparison
             if topper_comparison is None:
-                logger.info("🚫 No high-quality topper match found - proceeding with standard 13-dimensional analysis")
+                question_context = f" for Question {question_number}" if question_number else ""
+                logger.warning(f"🚨 GIVING FALLBACK RESPONSE FOR ENHANCED ANALYSIS{question_context}")
+                logger.warning("🚫 Reason: No high-quality topper match found - proceeding with standard 13-dimensional analysis")
+                logger.warning(f"GIVING FALLBACK RESPONSE{question_context} - Enhanced analysis falls back to 13D (no topper match)")
                 # Return standard analysis without topper dimension
                 return {
                     "success": True,
@@ -142,7 +146,8 @@ async def enhanced_comprehensive_analysis_with_topper_comparison(
             }
             
         except Exception as topper_error:
-            logger.error(f"Error in topper comparison analysis: {topper_error}")
+            logger.error(f"🚨 GIVING FALLBACK RESPONSE FOR ENHANCED ANALYSIS")
+            logger.error(f"❌ Error in topper comparison analysis: {topper_error}")
             
             # Fallback: Add generic topper dimension to standard analysis
             analysis_data = standard_analysis.get("analysis", {})
