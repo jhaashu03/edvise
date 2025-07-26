@@ -113,6 +113,9 @@ class ProgressTracker:
         
         # Call callback if provided (handle both sync and async callbacks)
         if self.callback:
+            print(f"🔧 DEBUG: ProgressTracker callback found, preparing to call it")
+            logger.info(f"🔧 DEBUG: ProgressTracker callback found, preparing to call it")
+            
             callback_data = {
                 "phase": phase,
                 "progress": progress,
@@ -125,12 +128,28 @@ class ProgressTracker:
                 "details": details
             }
             
+            print(f"⚡ DEBUG: About to call callback with data: {callback_data}")
+            logger.info(f"⚡ DEBUG: About to call callback with data: {callback_data}")
+            
             # Check if callback is async or sync
             import asyncio
-            if asyncio.iscoroutinefunction(self.callback):
-                await self.callback(callback_data)
-            else:
-                self.callback(callback_data)
+            try:
+                if asyncio.iscoroutinefunction(self.callback):
+                    print(f"🔄 DEBUG: Calling ASYNC callback")
+                    await self.callback(callback_data)
+                    print(f"✅ DEBUG: ASYNC callback completed successfully")
+                else:
+                    print(f"🔄 DEBUG: Calling SYNC callback")
+                    self.callback(callback_data)
+                    print(f"✅ DEBUG: SYNC callback completed successfully")
+            except Exception as callback_error:
+                print(f"💥 DEBUG: Callback execution failed: {callback_error}")
+                logger.error(f"💥 DEBUG: Callback execution failed: {callback_error}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"❌ DEBUG: No callback provided to ProgressTracker!")
+            logger.warning(f"❌ DEBUG: No callback provided to ProgressTracker!")
     
     def _format_message(self, phase: str, current_page: int, current_question: int, 
                        details: str, remaining_minutes: int) -> str:
@@ -722,7 +741,7 @@ You are analyzing a **HANDWRITTEN UPSC Civil Services Mains exam answer booklet*
         file_size_mb = file_size_bytes / (1024 * 1024)
         
         # Initialize progress tracker
-        progress_tracker = ProgressTracker(self.total_pages, progress_callback)
+        progress_tracker = ProgressTracker(self.total_pages, self.progress_callback)
         estimated_minutes = progress_tracker.estimate_total_time()
         
         # Log initial setup
@@ -934,7 +953,7 @@ You are analyzing a **HANDWRITTEN UPSC Civil Services Mains exam answer booklet*
         total_max_score = 0.0  # Initialize as float to avoid type issues
         
         # Create progress tracker for evaluation
-        progress_tracker = ProgressTracker(len(questions_list))
+        progress_tracker = ProgressTracker(len(questions_list), self.progress_callback)
         await progress_tracker.update_progress("answer_evaluation", current_question=0, 
                                                total_questions=len(questions_list),
                                                details="Starting comprehensive evaluation")
@@ -1080,13 +1099,13 @@ You are analyzing a **HANDWRITTEN UPSC Civil Services Mains exam answer booklet*
         return evaluation_summary
 
 
-async def process_vision_pdf_with_evaluation(file_path: str, db: Session, answer_id: int) -> Dict:
+async def process_vision_pdf_with_evaluation(file_path: str, db: Session, answer_id: int, progress_callback=None) -> Dict:
     """
     Complete end-to-end processing: Vision extraction + 13-dimensional evaluation
     """
     logger.info(f"DEBUG: process_vision_pdf_with_evaluation called with file_path={file_path}, answer_id={answer_id}")
     
-    processor = VisionPDFProcessor()
+    processor = VisionPDFProcessor(progress_callback=progress_callback)
     
     # Step 1: Extract questions and answers using vision (this already includes evaluation)
     logger.info("DEBUG: Starting vision extraction...")

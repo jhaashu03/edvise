@@ -107,11 +107,17 @@ const AnswersPage: React.FC = () => {
         uploadForm.file || undefined
       );
 
-      console.log('Upload response:', response);
+      console.log('🚀 Upload response:', response);
+      console.log('🎯 Upload form file:', uploadForm.file);
+      console.log('🔍 Task ID from response:', response.task_id);
 
       // Show modal progress if we have a task_id
       if (response.task_id && uploadForm.file) {
+        console.log('✅ Calling showProgress with task_id:', response.task_id);
         showProgress(response.task_id);
+        console.log('📊 Progress state after showProgress call - isVisible:', isVisible, 'taskId:', taskId);
+      } else {
+        console.log('❌ Not showing progress modal - task_id:', response.task_id, 'file:', uploadForm.file);
       }
 
       setUploadForm({ questionId: '', content: '', file: null });

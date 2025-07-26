@@ -115,7 +115,7 @@ class ApiService {
   }
 
   // Answer Upload & Evaluation
-  async uploadAnswer(questionId: string, content: string, file?: File): Promise<UploadedAnswer> {
+  async uploadAnswer(questionId: string, content: string, file?: File): Promise<UploadedAnswer & {task_id?: string}> {
     const formData = new FormData();
     formData.append('question_id', questionId);  // Fixed: backend expects question_id, not questionId
     formData.append('content', content);
@@ -123,12 +123,17 @@ class ApiService {
       formData.append('file', file);
     }
 
-    const response: AxiosResponse<{id: number, message: string, answer: UploadedAnswer}> = await this.api.post('/answers/upload', formData, {
+    const response: AxiosResponse<{id: number, message: string, answer: UploadedAnswer, task_id?: string}> = await this.api.post('/answers/upload', formData, {
       headers: {
         'Content-Type': 'multipart/form-data',
       },
     });
-    return response.data.answer;  // Extract the answer from the wrapped response
+    
+    // Return answer with task_id included for progress tracking
+    return {
+      ...response.data.answer,
+      task_id: response.data.task_id
+    };
   }
 
   async getAnswerEvaluation(answerId: string): Promise<AnswerEvaluation> {

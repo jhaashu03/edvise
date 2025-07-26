@@ -68,11 +68,57 @@ def comprehensive_pdf_evaluation(answer_id: int, file_path: str):
             logger.error(f"Answer {answer_id} not found")
             return
         
-        # Set up progress tracking
-        def progress_callback(progress):
-            answer.processing_progress = progress
-            local_db.commit()  # Immediate commit for progress updates
-            logger.info(f"Answer {answer_id} progress: {progress}%")
+        # Set up WebSocket progress tracking
+        from app.api.websocket_progress import progress_manager, create_progress_callback
+        import asyncio
+        
+        # Get task_id from answer record (set by upload endpoint)
+        task_id = answer.task_id
+        if not task_id:
+            # Fallback: generate task_id if not set (shouldn't happen in normal flow)
+            import uuid
+            task_id = f"pdf_eval_{answer_id}_{uuid.uuid4().hex[:8]}"
+            answer.task_id = task_id
+            local_db.commit()
+        
+        # Create WebSocket progress callback
+        websocket_progress_callback = create_progress_callback(task_id)
+        
+        # Combined progress callback that updates both DB and WebSocket
+        async def progress_callback(progress_data):
+            print(f"🚀 DEBUG: progress_callback called with data: {progress_data}")
+            logger.info(f"🚀 DEBUG: progress_callback called with data: {progress_data}")
+            
+            # Handle both old-style progress (just number) and new-style (dict)
+            if isinstance(progress_data, (int, float)):
+                progress_value = progress_data
+                progress_dict = {
+                    "phase": "processing",
+                    "progress": progress_value,
+                    "message": f"Processing: {progress_value}%"
+                }
+            else:
+                progress_dict = progress_data
+                progress_value = progress_dict.get("progress", 0)
+            
+            print(f"📊 DEBUG: Sending progress to DB and WebSocket - progress: {progress_value}%, dict: {progress_dict}")
+            logger.info(f"📊 DEBUG: Sending progress to DB and WebSocket - progress: {progress_value}%, dict: {progress_dict}")
+            
+            # Update database
+            answer.processing_progress = progress_value
+            local_db.commit()
+            print(f"💾 DEBUG: Database updated with progress: {progress_value}%")
+            
+            # Send to WebSocket
+            try:
+                await websocket_progress_callback(progress_dict)
+                print(f"📡 DEBUG: WebSocket message sent successfully for task_id: {task_id}")
+                logger.info(f"📡 DEBUG: WebSocket message sent successfully for task_id: {task_id}")
+            except Exception as ws_error:
+                print(f"❌ DEBUG: WebSocket send failed: {ws_error}")
+                logger.error(f"❌ DEBUG: WebSocket send failed: {ws_error}")
+            
+            logger.info(f"Answer {answer_id} progress: {progress_value}%")
         
         # Process the PDF using the same method as our working debug script
         logger.info(f"Starting PDF processing for answer_id={answer_id}")
@@ -90,7 +136,7 @@ def comprehensive_pdf_evaluation(answer_id: int, file_path: str):
             
             try:
                 evaluation_results = loop.run_until_complete(
-                    process_vision_pdf_with_evaluation(answer.file_path, local_db, answer_id)
+                    process_vision_pdf_with_evaluation(answer.file_path, local_db, answer_id, progress_callback)
                 )
                 logger.info(f"PDF processing completed successfully - type: {type(evaluation_results)}")
                 
@@ -355,6 +401,38 @@ def comprehensive_pdf_evaluation(answer_id: int, file_path: str):
                 logger.error(f"Failed to create emergency fallback: {fallback_error}")
     
     finally:
+        # Send completion signal to trigger frontend auto-refresh
+        try:
+            if task_id:
+                # Get task_id from answer if we have one
+                answer = local_db.query(Answer).filter(Answer.id == answer_id).first()
+                if answer and answer.task_id:
+                    task_id = answer.task_id
+                    
+                    # Send completion signal via WebSocket
+                    from app.api.websocket_progress import create_progress_callback
+                    import asyncio
+                    
+                    completion_callback = create_progress_callback(task_id)
+                    completion_data = {
+                        "phase": "completed",
+                        "progress": 100,
+                        "message": "✅ Processing completed successfully! Evaluation ready.",
+                        "details": "PDF processing and evaluation finished",
+                        "estimated_remaining_minutes": 0
+                    }
+                    
+                    # Send completion signal
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(completion_callback(completion_data))
+                        logger.info(f"📡 Completion signal sent for task_id: {task_id}")
+                    finally:
+                        loop.close()
+        except Exception as completion_error:
+            logger.error(f"Failed to send completion signal: {completion_error}")
+        
         # Ensure session is properly closed
         local_db.close()
         logger.info(f"Background task completed for answer_id={answer_id}")
@@ -881,19 +959,30 @@ async def upload_answer(
         
         logger.info(f"Answer created with ID: {answer.id}")
         
-        # If PDF file was uploaded, start background processing
+        # Generate task_id for PDF processing progress tracking
+        task_id = None
         if file_path and file_path.endswith('.pdf'):
+            import uuid
+            task_id = f"pdf_eval_{answer.id}_{uuid.uuid4().hex[:8]}"
+            
+            # Store task_id in answer for the background task to use
+            answer.task_id = task_id
+            db.commit()
+            
+            # Start background processing
             background_tasks.add_task(
                 comprehensive_pdf_evaluation,
                 answer.id,
                 file_path
             )
-            logger.info(f"Started background PDF processing for answer {answer.id}")
+            logger.info(f"Started background PDF processing for answer {answer.id} with task_id {task_id}")
         
         # Ensure the `answer` field is included in the response
         return AnswerUploadResponse(
             id=answer.id,
             message="Answer uploaded successfully" + (" and processing started" if file_path else ""),
+            task_id=task_id,
+            processing_started=bool(file_path and file_path.endswith('.pdf')),
             answer=AnswerResponse(
                 id=answer.id,
                 question_id=answer.question_id,

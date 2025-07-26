@@ -11,6 +11,8 @@ class UploadedAnswer(Base):
     question_id = Column(String, nullable=False)  # Reference to PYQ or custom question
     content = Column(Text, nullable=True)  # Made nullable for PDF uploads
     file_path = Column(String, nullable=True)
+    task_id = Column(String, nullable=True)  # WebSocket task ID for progress tracking
+    processing_progress = Column(Float, nullable=True, default=0.0)  # Progress percentage
     uploaded_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
