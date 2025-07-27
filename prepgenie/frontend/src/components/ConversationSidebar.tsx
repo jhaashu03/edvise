@@ -46,6 +46,7 @@ interface ConversationSidebarProps {
   currentConversationId?: string;
   onConversationSelect: (conversationId: string) => void;
   onNewConversation: () => void;
+  onConversationCreated?: () => void;
 }
 
 const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
@@ -60,6 +61,20 @@ const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
   const [loading, setLoading] = useState(false);
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
   const [showContextMenu, setShowContextMenu] = useState<string | null>(null);
+
+  // Auto-close context menu when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (showContextMenu) {
+        setShowContextMenu(null);
+      }
+    };
+
+    if (showContextMenu) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [showContextMenu]);
 
   // Load conversations on component mount and when tab changes
   useEffect(() => {
@@ -161,12 +176,23 @@ const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
     const date = new Date(dateString);
     const now = new Date();
     const diffTime = Math.abs(now.getTime() - date.getTime());
+    const diffHours = diffTime / (1000 * 60 * 60);
     const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+    // For recent messages (within 24 hours), show time in IST
+    if (diffHours < 24) {
+      return date.toLocaleTimeString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+      });
+    }
 
     if (diffDays === 1) return 'Today';
     if (diffDays === 2) return 'Yesterday';
     if (diffDays <= 7) return `${diffDays - 1} days ago`;
-    return date.toLocaleDateString();
+    return date.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' });
   };
 
   const getTopicColor = (topic?: string) => {
@@ -187,9 +213,9 @@ const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
   };
 
   return (
-    <div className="w-80 bg-gradient-to-br from-slate-50 to-white border-r border-slate-200/60 flex flex-col h-full shadow-sm">
+    <div className="w-80 bg-white border-r border-slate-200 flex flex-col h-full m-0 p-0">
       {/* Header */}
-      <div className="px-6 py-5 border-b border-slate-200/50 bg-white/60 backdrop-blur-sm">
+      <div className="px-6 py-4 border-b border-slate-200 bg-white">
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center space-x-3">
             <div className="p-2 bg-gradient-to-br from-blue-500 to-purple-600 rounded-xl shadow-sm">
@@ -209,14 +235,20 @@ const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
 
         {/* Stats */}
         {stats && (
-          <div className="grid grid-cols-2 gap-2 mb-4 text-xs">
-            <div className="bg-blue-50 p-2 rounded">
-              <div className="font-medium text-blue-900">{stats.active_conversations}</div>
-              <div className="text-blue-600">Active</div>
+          <div className="grid grid-cols-2 gap-3 mb-4 text-xs">
+            <div 
+              className="bg-blue-50 p-3 rounded-lg border border-blue-100 cursor-help transition-all hover:bg-blue-100" 
+              title="Active conversations are ongoing chats that haven't been archived. These are your current discussion threads."
+            >
+              <div className="font-bold text-blue-900 text-lg">{stats.active_conversations}</div>
+              <div className="text-blue-600 font-medium">Active Chats</div>
             </div>
-            <div className="bg-gray-50 p-2 rounded">
-              <div className="font-medium text-gray-900">{stats.total_messages}</div>
-              <div className="text-gray-600">Messages</div>
+            <div 
+              className="bg-gray-50 p-3 rounded-lg border border-gray-100 cursor-help transition-all hover:bg-gray-100" 
+              title="Total messages sent and received across all your conversations, including both your questions and AI responses."
+            >
+              <div className="font-bold text-gray-900 text-lg">{stats.total_messages}</div>
+              <div className="text-gray-600 font-medium">All Messages</div>
             </div>
           </div>
         )}
@@ -304,32 +336,32 @@ const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
 
                 {/* Context menu */}
                 {showContextMenu === conversation.uuid && (
-                  <div className="absolute right-2 top-10 bg-white/95 backdrop-blur-md border border-slate-200/60 rounded-xl shadow-xl z-50 py-2 min-w-[160px] animate-in slide-in-from-top-2 duration-200">
+                  <div className="absolute right-2 top-10 bg-white border border-slate-200 rounded-lg shadow-lg z-50 py-2 min-w-[140px] animate-in slide-in-from-top-2 duration-200">
                     <button
                       onClick={() => handleConversationAction('pin', conversation.uuid)}
-                      className="w-full px-4 py-2.5 text-left text-sm text-slate-700 hover:bg-gradient-to-r hover:from-slate-50 hover:to-slate-100 flex items-center transition-all duration-150"
+                      className="w-full px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50 flex items-center transition-all duration-150 rounded-md mx-1"
                     >
                       <BookmarkIcon className="h-4 w-4 mr-3 text-slate-400" />
                       {conversation.is_pinned ? 'Unpin' : 'Pin'}
                     </button>
                     <button
                       onClick={() => handleConversationAction('export', conversation.uuid)}
-                      className="w-full px-4 py-2.5 text-left text-sm text-slate-700 hover:bg-gradient-to-r hover:from-slate-50 hover:to-slate-100 flex items-center transition-all duration-150"
+                      className="w-full px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50 flex items-center transition-all duration-150 rounded-md mx-1"
                     >
                       <DocumentArrowDownIcon className="h-4 w-4 mr-3 text-slate-400" />
                       Export
                     </button>
                     <button
                       onClick={() => handleConversationAction('archive', conversation.uuid)}
-                      className="w-full px-4 py-2.5 text-left text-sm text-slate-700 hover:bg-gradient-to-r hover:from-slate-50 hover:to-slate-100 flex items-center transition-all duration-150"
+                      className="w-full px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50 flex items-center transition-all duration-150 rounded-md mx-1"
                     >
                       <ArchiveBoxIcon className="h-4 w-4 mr-3 text-slate-400" />
                       Archive
                     </button>
-                    <div className="border-t border-slate-200/60 my-2"></div>
+                    <div className="border-t border-slate-200 my-2"></div>
                     <button
                       onClick={() => handleConversationAction('delete', conversation.uuid)}
-                      className="w-full px-4 py-2.5 text-left text-sm text-red-600 hover:bg-gradient-to-r hover:from-red-50 hover:to-red-100 flex items-center transition-all duration-150"
+                      className="w-full px-3 py-2 text-left text-sm text-red-600 hover:bg-red-50 flex items-center transition-all duration-150 rounded-md mx-1"
                     >
                       <TrashIcon className="h-4 w-4 mr-3 text-red-500" />
                       Delete

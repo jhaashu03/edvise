@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { apiService } from '../services/api';
 import { ChatMessage } from '../types';
 import ConversationSidebar from '../components/ConversationSidebar';
+import { useNavigation } from '../contexts/NavigationContext';
 import { 
   PaperAirplaneIcon, 
   UserIcon, 
@@ -18,6 +19,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 const ChatPage: React.FC = () => {
+  const { navCollapsed } = useNavigation();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [newMessage, setNewMessage] = useState('');
   const [loading, setLoading] = useState(false);
@@ -199,11 +201,11 @@ const ChatPage: React.FC = () => {
   ];
 
   return (
-    <div className="flex h-screen bg-gray-50">
+    <div className="flex h-screen">
       {/* Conversation Sidebar - Desktop always visible, mobile toggle */}
       <div className={`${
         sidebarOpen ? 'translate-x-0' : '-translate-x-full'
-      } fixed inset-y-0 left-0 z-50 transition-transform duration-300 ease-in-out lg:translate-x-0 lg:static lg:inset-0`}>
+      } fixed inset-y-0 left-0 z-50 transition-transform duration-300 ease-in-out lg:translate-x-0 lg:static lg:inset-0 lg:flex-shrink-0 lg:ml-0 lg:mr-0`}>
         <ConversationSidebar
           currentConversationId={currentConversationId || undefined}
           onConversationSelect={handleConversationSelect}
@@ -318,7 +320,9 @@ const ChatPage: React.FC = () => {
                     style={{ animationDelay: `${index * 0.1}s` }}
                   >
                     <div
-                      className={`flex space-x-3 max-w-3xl ${
+                      className={`flex space-x-3 ${
+                        navCollapsed ? 'max-w-5xl' : 'max-w-3xl'
+                      } ${
                         message.role === 'user' ? 'flex-row-reverse space-x-reverse' : ''
                       }`}
                     >
@@ -386,7 +390,9 @@ const ChatPage: React.FC = () => {
 
                 {loading && (
                   <div className="flex justify-start">
-                    <div className="flex space-x-3 max-w-3xl">
+                    <div className={`flex space-x-3 ${
+                      navCollapsed ? 'max-w-5xl' : 'max-w-3xl'
+                    }`}>
                       <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-gradient-to-r from-accent-400 to-accent-500 text-white flex items-center justify-center shadow-lg">
                         <SparklesIcon className="w-4 h-4 sm:w-5 sm:h-5 animate-pulse" />
                       </div>
