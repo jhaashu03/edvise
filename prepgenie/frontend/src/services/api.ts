@@ -147,13 +147,103 @@ class ApiService {
   }
 
   // Chat
-  async sendChatMessage(message: string): Promise<ChatMessage> {
-    const response: AxiosResponse<ChatMessage> = await this.api.post('/chat/', { message });
+  async sendChatMessage(message: string, conversationId?: string): Promise<ChatMessage> {
+    const payload: any = { message };
+    if (conversationId) {
+      payload.conversation_id = conversationId;
+    }
+    const response: AxiosResponse<ChatMessage> = await this.api.post('/chat/', payload);
     return response.data;
   }
 
   async getChatHistory(limit: number = 50): Promise<ChatMessage[]> {
     const response: AxiosResponse<ChatMessage[]> = await this.api.get(`/chat/history?limit=${limit}`);
+    return response.data;
+  }
+
+  async getConversationMessages(conversationId: string, limit: number = 50): Promise<ChatMessage[]> {
+    // Filter chat history by conversation_uuid for now
+    // In a full implementation, there would be a dedicated endpoint
+    const allHistory = await this.getChatHistory(200); // Get more messages to filter
+    return allHistory.filter(msg => msg.conversation_uuid === conversationId).slice(0, limit);
+  }
+
+  // Conversation Management
+  async getConversations(params: {
+    page?: number;
+    per_page?: number;
+    status?: string;
+    topic?: string;
+    sort_by?: string;
+    sort_order?: string;
+  } = {}): Promise<{
+    conversations: any[];
+    total: number;
+    page: number;
+    per_page: number;
+    has_next: boolean;
+  }> {
+    const queryParams = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined) {
+        queryParams.append(key, value.toString());
+      }
+    });
+    
+    const response = await this.api.get(`/conversation-management/conversations?${queryParams}`);
+    return response.data;
+  }
+
+  async searchConversations(params: {
+    query: string;
+    status?: string;
+    topic?: string;
+    date_from?: string;
+    date_to?: string;
+  }): Promise<{
+    conversations: any[];
+    total: number;
+    page: number;
+    per_page: number;
+    has_next: boolean;
+  }> {
+    const response = await this.api.post('/conversation-management/conversations/search', params);
+    return response.data;
+  }
+
+  async getConversationStats(): Promise<{
+    active_conversations: number;
+    archived_conversations: number;
+    total_messages: number;
+    conversations_this_week: number;
+    most_active_topics: Array<{topic: string, count: number}>;
+  }> {
+    const response = await this.api.get('/conversation-management/conversations/stats');
+    return response.data;
+  }
+
+  async updateConversation(conversationUuid: string, updates: {
+    title?: string;
+    tags?: string;
+    is_pinned?: boolean;
+    status?: string;
+  }): Promise<any> {
+    const response = await this.api.put(`/conversation-management/conversations/${conversationUuid}`, updates);
+    return response.data;
+  }
+
+  async deleteConversation(conversationUuid: string): Promise<any> {
+    const response = await this.api.delete(`/conversation-management/conversations/${conversationUuid}`);
+    return response.data;
+  }
+
+  async archiveConversation(conversationUuid: string): Promise<any> {
+    const response = await this.api.post(`/conversation-management/conversations/${conversationUuid}/archive`);
+    return response.data;
+  }
+
+  async exportConversation(conversationUuid: string, format: 'json' | 'txt' | 'md' = 'json'): Promise<any> {
+    const response = await this.api.post(`/conversation-management/conversations/${conversationUuid}/export?format=${format}`);
     return response.data;
   }
 

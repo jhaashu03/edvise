@@ -99,9 +99,12 @@ export interface AnswerEvaluation {
 
 export interface ChatMessage {
   id: string;
+  conversation_id?: string;
+  conversation_uuid?: string;
   role: 'user' | 'assistant';
   content: string;
   timestamp: string;
+  tokens_used?: number;
 }
 
 export interface ProgressData {

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { apiService } from '../services/api';
 import { ChatMessage } from '../types';
+import ConversationSidebar from '../components/ConversationSidebar';
 import { 
   PaperAirplaneIcon, 
   UserIcon, 
@@ -9,7 +10,9 @@ import {
   BookOpenIcon,
   GlobeAltIcon,
   LightBulbIcon,
-  AcademicCapIcon
+  AcademicCapIcon,
+  Bars3Icon,
+  XMarkIcon
 } from '@heroicons/react/24/outline';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -18,11 +21,81 @@ const ChatPage: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [newMessage, setNewMessage] = useState('');
   const [loading, setLoading] = useState(false);
+  const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  // Load conversation messages when conversation changes
+  useEffect(() => {
+    if (currentConversationId && currentConversationId !== 'new-conversation') {
+      loadConversationMessages(currentConversationId);
+    } else if (currentConversationId === 'new-conversation') {
+      // Keep messages empty for new conversation
+      setMessages([]);
+    } else {
+      // Load latest conversation or start fresh
+      loadLatestConversation();
+    }
+  }, [currentConversationId]);
+
+  const loadConversationMessages = async (conversationId: string) => {
+    try {
+      console.log('🔄 Loading conversation messages...', conversationId);
+      const history = await apiService.getConversationMessages(conversationId, 50);
+      console.log('📜 Conversation messages loaded:', history.length, 'messages');
+      setMessages(history);
+    } catch (error) {
+      console.error('❌ Failed to load conversation messages:', error);
+      setMessages([]);
+    }
+  };
+
+  const loadLatestConversation = async () => {
+    try {
+      const conversations = await apiService.getConversations({ page: 1, per_page: 1 });
+      if (conversations.conversations.length > 0) {
+        const latestConversation = conversations.conversations[0];
+        setCurrentConversationId(latestConversation.uuid);
+      } else {
+        // No conversations exist, start fresh
+        setMessages([]);
+      }
+    } catch (error) {
+      console.error('❌ Failed to load latest conversation:', error);
+      setMessages([]);
+    }
+  };
+
+  // Conversation management handlers
+  const handleConversationSelect = (conversationId: string) => {
+    console.log('🔄 Switching to conversation:', conversationId);
+    setCurrentConversationId(conversationId);
+    // Close sidebar on mobile after selection
+    if (window.innerWidth < 768) {
+      setSidebarOpen(false);
+    }
+  };
+
+  const handleNewConversation = () => {
+    console.log('🆕 Starting new conversation');
+    // Generate a temporary ID to prevent loading latest conversation
+    setCurrentConversationId('new-conversation');
+    setMessages([]);
+    // Clear any PYQ context
+    sessionStorage.removeItem('pyq_context');
+    // Close sidebar on mobile
+    if (window.innerWidth < 768) {
+      setSidebarOpen(false);
+    }
+  };
+
+  const toggleSidebar = () => {
+    setSidebarOpen(!sidebarOpen);
   };
 
   useEffect(() => {
@@ -71,8 +144,17 @@ const ChatPage: React.FC = () => {
     setLoading(true);
 
     try {
-      const response = await apiService.sendChatMessage(newMessage);
+      const response = await apiService.sendChatMessage(
+        newMessage, 
+        currentConversationId === 'new-conversation' ? undefined : currentConversationId || undefined
+      );
       setMessages((prev) => [...prev, response]);
+      
+      // Update current conversation ID to maintain conversation continuity
+      if (response.conversation_uuid) {
+        console.log(`🔄 DEBUG: Updating conversation ID from ${currentConversationId} to ${response.conversation_uuid}`);
+        setCurrentConversationId(response.conversation_uuid);
+      }
     } catch (error) {
       console.error('Failed to send message:', error);
       // Add error message
@@ -117,36 +199,69 @@ const ChatPage: React.FC = () => {
   ];
 
   return (
-    <div className="flex flex-col h-screen">
-      {/* Fixed Header */}
-      <div className="flex-shrink-0 bg-white/80 backdrop-blur-xl border-b border-gray-200/50 shadow-sm">
-        <div className="px-4 sm:px-6 lg:px-8 py-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-4">
-              <div className="w-10 h-10 bg-gradient-to-r from-primary-500 to-secondary-500 rounded-xl flex items-center justify-center shadow-lg">
-                <SparklesIcon className="w-5 h-5 text-white" />
-              </div>
-              <div>
-                <h1 className="text-xl sm:text-2xl font-bold bg-gradient-to-r from-ai-900 via-primary-700 to-secondary-700 bg-clip-text text-transparent">
-                  AI Chat Assistant
-                </h1>
-                <div className="flex items-center space-x-2 text-sm">
-                  <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-                  <span className="text-ai-600 font-medium">Online</span>
+    <div className="flex h-screen bg-gray-50">
+      {/* Conversation Sidebar - Desktop always visible, mobile toggle */}
+      <div className={`${
+        sidebarOpen ? 'translate-x-0' : '-translate-x-full'
+      } fixed inset-y-0 left-0 z-50 transition-transform duration-300 ease-in-out lg:translate-x-0 lg:static lg:inset-0`}>
+        <ConversationSidebar
+          currentConversationId={currentConversationId || undefined}
+          onConversationSelect={handleConversationSelect}
+          onNewConversation={handleNewConversation}
+        />
+      </div>
+
+      {/* Mobile sidebar overlay */}
+      {sidebarOpen && (
+        <div 
+          className="fixed inset-0 bg-gray-600 bg-opacity-75 z-40 lg:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
+      {/* Main Chat Area */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Fixed Header */}
+        <div className="flex-shrink-0 bg-white/80 backdrop-blur-xl border-b border-gray-200/50 shadow-sm">
+          <div className="px-4 sm:px-6 lg:px-8 py-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-4">
+                {/* Mobile sidebar toggle */}
+                <button
+                  onClick={toggleSidebar}
+                  className="lg:hidden p-2 rounded-md text-gray-400 hover:text-gray-500 hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500"
+                >
+                  {sidebarOpen ? (
+                    <XMarkIcon className="h-6 w-6" aria-hidden="true" />
+                  ) : (
+                    <Bars3Icon className="h-6 w-6" aria-hidden="true" />
+                  )}
+                </button>
+                
+                <div className="w-10 h-10 bg-gradient-to-r from-primary-500 to-secondary-500 rounded-xl flex items-center justify-center shadow-lg">
+                  <SparklesIcon className="w-5 h-5 text-white" />
+                </div>
+                <div>
+                  <h1 className="text-xl sm:text-2xl font-bold bg-gradient-to-r from-ai-900 via-primary-700 to-secondary-700 bg-clip-text text-transparent">
+                    AI Chat Assistant
+                  </h1>
+                  <div className="flex items-center space-x-2 text-sm">
+                    <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                    <span className="text-ai-600 font-medium">Online</span>
+                  </div>
                 </div>
               </div>
-            </div>
-            
-            {/* Status indicator on desktop */}
-            <div className="hidden sm:flex items-center space-x-2 text-sm text-ai-500">
-              <BoltIcon className="w-4 h-4" />
-              <span>Powered by advanced AI</span>
+              
+              {/* Status indicator on desktop */}
+              <div className="hidden sm:flex items-center space-x-2 text-sm text-ai-500">
+                <BoltIcon className="w-4 h-4" />
+                <span>Powered by advanced AI</span>
+              </div>
             </div>
           </div>
         </div>
-      </div>
 
-      {/* Scrollable Messages Container */}
+        {/* Scrollable Messages Container */}
       <div className="flex-1 min-h-0 overflow-hidden relative bg-gradient-to-br from-ai-50 via-white to-primary-50">
         <div className="h-full overflow-y-auto" ref={messagesContainerRef}>
           <div className="px-4 sm:px-6 lg:px-8 py-6">
@@ -332,6 +447,7 @@ const ChatPage: React.FC = () => {
             </p>
           </div>
         </div>
+      </div>
       </div>
     </div>
   );
