@@ -49,7 +49,7 @@ const Layout: React.FC = () => {
   }
 
   return (
-    <div className="h-screen bg-gradient-to-br from-ai-50 via-primary-50 to-secondary-50 overflow-hidden">
+    <div className="h-screen bg-gradient-to-br from-ai-50 via-primary-50 to-secondary-50">
       {/* Background Pattern */}
       <div className="fixed inset-0 bg-ai-mesh opacity-30 pointer-events-none"></div>
       
@@ -235,8 +235,8 @@ const Layout: React.FC = () => {
             </div>
           </div>
 
-          <main className="flex-1 overflow-hidden relative m-0 p-0">
-            <div className="h-full m-0 p-0">
+          <main className="flex-1 overflow-y-auto relative m-0 p-0">
+            <div className="min-h-full m-0 p-0">
               <NavigationProvider navCollapsed={navCollapsed}>
                 <Outlet />
               </NavigationProvider>

@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.api_v1.endpoints import auth, users, study_plans, pyqs, answers, chat, progress, syllabus, conversation_management
+from app.api.api_v1.endpoints import auth, users, study_plans, pyqs, answers, chat, progress, syllabus, conversation_management, pyq_search
 from app.api import llm_endpoints, websocket_progress
 
 api_router = APIRouter()
@@ -14,6 +14,8 @@ api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
 api_router.include_router(conversation_management.router, prefix="/conversation-management", tags=["conversation-management"])
 api_router.include_router(progress.router, prefix="/progress", tags=["progress"])
 api_router.include_router(syllabus.router, prefix="/syllabus", tags=["syllabus"])
+# Add PYQ search endpoints
+api_router.include_router(pyq_search.router, prefix="/pyq-search", tags=["pyq-search"])
 # Add Ollama LLM endpoints
 api_router.include_router(llm_endpoints.router, prefix="/llm", tags=["llm"])
 # Add WebSocket progress tracking

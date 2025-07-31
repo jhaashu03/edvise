@@ -8,6 +8,7 @@ import {
   StudyPlan, 
   PYQ, 
   PYQSearchResult,
+  PaginatedPYQSearchResponse,
   UploadedAnswer, 
   AnswerEvaluation,
   ChatMessage,
@@ -105,8 +106,16 @@ class ApiService {
       ...(filters?.year && { year: filters.year }),
     };
 
-    const response: AxiosResponse<PYQSearchResult[]> = await this.api.post('/pyqs/search', searchRequest);
-    return response.data; // Backend returns array directly, not nested in 'data' property
+    try {
+      // Try the paginated endpoint first (newer API)
+      const response: AxiosResponse<PaginatedPYQSearchResponse> = await this.api.post('/pyq-search/search', searchRequest);
+      return response.data.results;
+    } catch (error) {
+      // Fallback to direct array endpoint (older API)
+      console.warn('Paginated endpoint failed, falling back to direct array endpoint:', error);
+      const response: AxiosResponse<PYQSearchResult[]> = await this.api.post('/pyqs/search', searchRequest);
+      return response.data;
+    }
   }
 
   async getPYQsBySubject(subject: string): Promise<PYQ[]> {

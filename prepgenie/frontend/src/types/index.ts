@@ -137,3 +137,13 @@ export interface ApiResponse<T> {
   message: string;
   success: boolean;
 }
+
+export interface PaginatedResponse<T> {
+  results: T[];
+  total_found: number;
+  query: string;
+  filters: Record<string, any>;
+  processing_time_ms: number;
+}
+
+export interface PaginatedPYQSearchResponse extends PaginatedResponse<PYQSearchResult> {}

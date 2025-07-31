@@ -239,10 +239,10 @@ const PYQSearchPage: React.FC = () => {
                     <div className="flex items-center space-x-4 mb-4">
                       <span
                         className={`inline-flex items-center px-3 py-1 text-sm font-semibold rounded-xl shadow-sm ${getDifficultyColor(
-                          pyq.difficulty
+                          pyq.difficulty || 'medium'
                         )}`}
                       >
-                        {pyq.difficulty.charAt(0).toUpperCase() + pyq.difficulty.slice(1)}
+                        {pyq.difficulty ? pyq.difficulty.charAt(0).toUpperCase() + pyq.difficulty.slice(1) : 'Medium'}
                       </span>
                       
                       <span className="inline-flex items-center px-3 py-1 text-sm font-medium bg-gradient-to-r from-purple-100 to-indigo-100 text-purple-800 rounded-xl border border-purple-200/50">
