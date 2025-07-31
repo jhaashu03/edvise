@@ -33,6 +33,7 @@ class PYQ(PYQBase):
 class PYQSearchRequest(BaseModel):
     query: str
     limit: Optional[int] = 10
+    page: Optional[int] = 1
     subject: Optional[str] = None
     year: Optional[int] = None
     difficulty: Optional[str] = None
@@ -47,3 +48,11 @@ class PYQSearchResult(BaseModel):
     difficulty: str
     marks: int
     similarity_score: float
+
+class PaginatedPYQSearchResponse(BaseModel):
+    results: List[PYQSearchResult]
+    total: int
+    page: int
+    limit: int
+    has_next: bool
+    has_prev: bool

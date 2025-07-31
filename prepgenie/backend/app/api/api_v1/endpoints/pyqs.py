@@ -5,9 +5,10 @@ import logging
 from app.db.database import get_db
 from app.models.user import User
 from app.api.api_v1.endpoints.auth import get_current_user
-from app.schemas.pyq import PYQCreate, PYQ, PYQSearchRequest, PYQSearchResult, PYQUpdate
+from app.schemas.pyq import PYQCreate, PYQ, PYQSearchRequest, PYQSearchResult, PYQUpdate, PaginatedPYQSearchResponse
 from app.crud import pyq as crud_pyq
 from app.services.vector_service import vector_service
+from app.services.enhanced_pyq_scoring import enhanced_scorer
 import json
 
 router = APIRouter()
@@ -34,20 +35,44 @@ async def search_pyqs(
             if search_request.difficulty:
                 filters["difficulty"] = search_request.difficulty
             
-            # Perform semantic search using VectorService
-            results = await vector_service.search_similar_pyqs(
-                query=search_request.query,
-                limit=search_request.limit,
-                filters=filters if filters else None
-            )
+            # Perform semantic search using PYQVectorService
+            from app.services.pyq_vector_service import PYQVectorService
             
-            # Filter out low similarity results (less than 30%)
-            high_quality_results = [r for r in results if r.get('similarity_score', 0) >= 0.3]
+            pyq_vector_service = PYQVectorService()
+            if pyq_vector_service.connect() and pyq_vector_service.load_collection():
+                results = pyq_vector_service.search_questions(
+                    query=search_request.query,
+                    limit=search_request.limit
+                    # Note: We'll add filters back later after testing basic functionality
+                )
+                logger.info(f"PYQ Vector Service returned {len(results)} results")
+            else:
+                logger.warning("PYQ Vector Service connection failed")
+                results = []
+            
+            # Debug: Log original similarity scores
+            if results:
+                scores = [r.get('similarity_score', 0) for r in results]
+                logger.info(f"Vector search returned {len(results)} results with original scores: {[f'{s:.3f}' for s in scores[:5]]}")
+            
+            # Apply enhanced multi-factor scoring system
+            enhanced_results = enhanced_scorer.rank_results(results, search_request.query)
+            
+            # Filter using dynamic threshold based on enhanced scores
+            # Enhanced scoring adjusts for query type, topic importance, and other factors
+            min_enhanced_threshold = 0.1  # Lower threshold since enhanced scoring is more intelligent
+            high_quality_results = [r for r in enhanced_results if r.get('similarity_score', 0) >= min_enhanced_threshold]
             
             if high_quality_results:
+                # Log enhanced scoring details for top results
+                top_result = high_quality_results[0]
+                logger.info(f"Enhanced scoring: Returning {len(high_quality_results)} results. "
+                           f"Top result: {top_result['similarity_score']:.3f} "
+                           f"(was {top_result['original_similarity']:.3f}) - "
+                           f"Factors: {top_result['score_explanation']}")
                 return [PYQSearchResult(**result) for result in high_quality_results]
             else:
-                logger.info("Vector search returned low quality results, falling back to keyword search")
+                logger.info(f"Enhanced scoring: {len(results)} results processed but all below {min_enhanced_threshold} threshold, falling back to keyword search")
                 
         except Exception as vector_error:
             logger.warning(f"Vector search failed: {vector_error}, falling back to keyword search")
@@ -62,12 +87,16 @@ async def search_pyqs(
 
 def _fallback_keyword_search(search_request: PYQSearchRequest, db: Session) -> List[PYQSearchResult]:
     """
-    Intelligent keyword-based search as fallback
+    Intelligent keyword-based search as fallback using restored database
     """
+    from app.services.enhanced_pyq_scoring import enhanced_scorer
+    
     query_lower = search_request.query.lower()
+    logger.info(f"🔍 Fallback search for query: '{search_request.query}' (limit: {search_request.limit})")
     
     # Get all PYQs from database
     all_pyqs = crud_pyq.get_pyqs(db=db, skip=0, limit=1000)
+    logger.info(f"📊 Retrieved {len(all_pyqs)} questions from database")
     
     results = []
     for pyq in all_pyqs:
@@ -109,8 +138,8 @@ def _fallback_keyword_search(search_request: PYQSearchRequest, db: Session) -> L
                 subject=pyq.subject,
                 year=pyq.year,
                 paper=pyq.paper,
-                topics=json.loads(pyq.topic) if pyq.topic else [],
-                difficulty=pyq.difficulty.value,
+                topics=[pyq.topic] if pyq.topic else [],  # topic is singular in database
+                difficulty=pyq.difficulty,  # difficulty is VARCHAR, not enum
                 marks=pyq.marks,
                 similarity_score=min(score, 0.95)  # Cap at 95%
             )
@@ -118,7 +147,41 @@ def _fallback_keyword_search(search_request: PYQSearchRequest, db: Session) -> L
     
     # Sort by relevance and limit results
     results.sort(key=lambda x: x.similarity_score, reverse=True)
-    return results[:search_request.limit]
+    
+    # Apply enhanced scoring if we have results
+    if results:
+        logger.info(f"🎯 Found {len(results)} relevant matches, applying enhanced scoring...")
+        
+        # Convert to format expected by enhanced scorer
+        enhanced_results = []
+        for result in results:
+            enhanced_result = enhanced_scorer.calculate_enhanced_score(
+                base_similarity=result.similarity_score,
+                query=search_request.query,
+                result={
+                    'question': result.question,
+                    'subject': result.subject,
+                    'year': result.year,
+                    'paper': result.paper,
+                    'topics': result.topics,
+                    'difficulty': result.difficulty,
+                    'marks': result.marks
+                }
+            )
+            
+            # Update the result with enhanced score
+            result.similarity_score = enhanced_result['similarity_score']
+            enhanced_results.append(result)
+        
+        # Sort again by enhanced scores
+        enhanced_results.sort(key=lambda x: x.similarity_score, reverse=True)
+        final_results = enhanced_results[:search_request.limit]
+        
+        logger.info(f"✅ Returning {len(final_results)} enhanced results (top score: {final_results[0].similarity_score:.3f})")
+        return final_results
+    else:
+        logger.warning(f"⚠️ No matches found for query: '{search_request.query}'")
+        return []
 
 def _get_sample_pyqs(search_request: PYQSearchRequest) -> List[PYQSearchResult]:
     """

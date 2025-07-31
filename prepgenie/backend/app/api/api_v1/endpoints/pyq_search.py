@@ -6,8 +6,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import logging
-from app.services.pyq_vector_service import PYQVectorService
-from app.utils.pyq_parser import PYQParser, PYQQuestion
+from app.services.pyq_vector_service import PYQVectorService, PYQQuestion
 
 logger = logging.getLogger(__name__)
 router = APIRouter()

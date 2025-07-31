@@ -8,9 +8,21 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 import logging
 import os
-from app.utils.pyq_parser import PYQQuestion
 from app.core.config import settings
 import json
+from typing import Optional
+from dataclasses import dataclass
+
+# Minimal PYQQuestion class definition (to avoid dependency on pyq_parser)
+@dataclass
+class PYQQuestion:
+    question_text: str
+    subject: str = "General Studies"
+    year: int = 2023
+    paper: str = "Paper I"
+    marks: int = 5
+    difficulty: str = "medium"
+    topic: Optional[str] = None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,11 +41,16 @@ class PYQVectorService:
         logger.info(f"🤖 Using embedding model: {self.model_name} (dim: {self.embedding_dim})")
         
         try:
-            self.embedding_model = SentenceTransformer(self.model_name)
-            logger.info("✅ Embedding model loaded successfully")
+            # Use offline mode to avoid SSL certificate issues
+            os.environ['TRANSFORMERS_OFFLINE'] = '1'
+            os.environ['HF_HUB_OFFLINE'] = '1'
+            
+            self.embedding_model = SentenceTransformer(self.model_name, device='cpu')
+            logger.info("✅ Embedding model loaded successfully from cache")
         except Exception as e:
             logger.error(f"❌ Failed to load model {self.model_name}: {e}")
-            raise
+            # Don't raise - allow service to continue without embedding model for direct Milvus access
+            self.embedding_model = None
         
         self.collection = None
         self.connection_alias = "pyq_default"
@@ -196,7 +213,12 @@ class PYQVectorService:
             if not hasattr(self, 'embedding_model') or self.embedding_model is None:
                 logger.info("🔄 Reinitializing embedding model...")
                 from sentence_transformers import SentenceTransformer
-                self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+                
+                # Use offline mode to avoid SSL issues
+                os.environ['TRANSFORMERS_OFFLINE'] = '1'
+                os.environ['HF_HUB_OFFLINE'] = '1'
+                
+                self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
             
             # Generate embeddings
             embeddings = self.embedding_model.encode(texts, convert_to_numpy=True)
@@ -216,7 +238,7 @@ class PYQVectorService:
             return np.array([])
     
     def calculate_keyword_score(self, query: str, question_text: str) -> float:
-        """Calculate keyword-based similarity score"""
+        """Calculate keyword-based similarity score with improved direct matching"""
         try:
             query_words = set(query.lower().split())
             question_words = set(question_text.lower().split())
@@ -229,10 +251,9 @@ class PYQVectorService:
             if not query_words or not question_words:
                 return 0.0
             
-            # Calculate Jaccard similarity
+            # Calculate word coverage (how many query words are in question)
             intersection = len(query_words & question_words)
-            union = len(query_words | question_words)
-            jaccard_score = intersection / union if union > 0 else 0.0
+            coverage_score = intersection / len(query_words) if query_words else 0.0
             
             # Boost for exact phrase matches
             phrase_bonus = 0.0
@@ -244,14 +265,20 @@ class PYQVectorService:
             for i in range(len(query_words_list) - 1):
                 bigram = ' '.join(query_words_list[i:i+2])
                 if bigram in text_lower:
-                    phrase_bonus += 0.3
+                    phrase_bonus += 0.4  # Increased from 0.3
                     
             for i in range(len(query_words_list) - 2):
                 trigram = ' '.join(query_words_list[i:i+3])
                 if trigram in text_lower:
-                    phrase_bonus += 0.5
+                    phrase_bonus += 0.6  # Increased from 0.5
             
-            return min(1.0, jaccard_score + phrase_bonus)
+            # Special bonus for complete keyword coverage
+            complete_match_bonus = 0.0
+            if coverage_score == 1.0:  # All query words found
+                complete_match_bonus = 0.3
+            
+            final_score = coverage_score + phrase_bonus + complete_match_bonus
+            return min(1.0, final_score)
             
         except Exception as e:
             logger.error(f"❌ Keyword scoring error: {e}")
@@ -309,7 +336,18 @@ class PYQVectorService:
                         paper_filter: Optional[str] = None) -> List[Dict[str, Any]]:
         """Search for similar questions using vector similarity"""
         try:
-            logger.info(f"🔍 Starting search for query: '{query}' with limit: {limit}")
+            # Adaptive limit for keyword queries to ensure perfect matches are found
+            query_words = len(query.split())
+            is_simple_keyword_query = query_words <= 3 and not any(word in query.lower() for word in ['what', 'how', 'why', 'explain', 'discuss', 'analyze'])
+            
+            # Increase search limit for keyword queries to find perfect matches ranked low
+            if is_simple_keyword_query and limit < 50:
+                search_limit = max(limit * 4, 50)  # At least 4x limit or 50, whichever is higher
+                logger.info(f"🎯 Keyword query detected - expanding search limit from {limit} to {search_limit}")
+            else:
+                search_limit = limit
+            
+            logger.info(f"🔍 Starting search for query: '{query}' with limit: {limit} (search_limit: {search_limit})")
             
             # Check collection status
             if not self.collection:
@@ -353,7 +391,7 @@ class PYQVectorService:
                     data=query_embedding.tolist(),
                     anns_field="embedding",
                     param=simple_search_params,
-                    limit=limit,
+                    limit=search_limit,  # Use adaptive limit
                     # Temporarily remove expr to debug
                     # expr=expr,
                     output_fields=["pyq_id", "question_text", "subject", "year"]
@@ -412,8 +450,19 @@ class PYQVectorService:
                         # Calculate keyword score
                         keyword_score = self.calculate_keyword_score(query, question_text)
                         
-                        # Calculate hybrid score (70% semantic, 30% keyword)
-                        final_score = self.hybrid_score(semantic_score, keyword_score, semantic_weight=0.7)
+                        # Dynamic weighting: if query is simple keywords, boost keyword weight
+                        query_words = len(query.split())
+                        is_simple_keyword_query = query_words <= 3 and not any(word in query.lower() for word in ['what', 'how', 'why', 'explain', 'discuss', 'analyze'])
+                        
+                        if is_simple_keyword_query and keyword_score > 0.7:
+                            # High keyword match for simple query - boost keyword weight
+                            semantic_weight = 0.4  # 40% semantic, 60% keyword
+                            logger.info(f"    🎯 Simple keyword query detected - boosting keyword weight")
+                        else:
+                            semantic_weight = 0.7  # Default: 70% semantic, 30% keyword
+                        
+                        # Calculate hybrid score
+                        final_score = self.hybrid_score(semantic_score, keyword_score, semantic_weight=semantic_weight)
                         
                         logger.info(f"    📊 Scores - Semantic: {semantic_score:.4f}, Keyword: {keyword_score:.4f}, Hybrid: {final_score:.4f}")
                         
@@ -465,7 +514,40 @@ class PYQVectorService:
             # Sort by hybrid score (highest first)
             formatted_results.sort(key=lambda x: x.get('similarity_score', 0), reverse=True)
             
-            logger.info(f"🎉 Found {len(formatted_results)} results for query: '{query[:50]}...'")
+            # Smart filtering: prioritize perfect keyword matches for simple queries
+            if is_simple_keyword_query and len(formatted_results) > limit:
+                logger.info(f"🎯 Filtering {len(formatted_results)} results down to {limit} with keyword priority")
+                
+                # Separate perfect matches from others
+                perfect_matches = []
+                other_results = []
+                
+                query_words_set = set(query.lower().split())
+                stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
+                clean_query_words = query_words_set - stop_words
+                
+                for result in formatted_results:
+                    question_text = result.get('question_text', '').lower()
+                    question_words_set = set(question_text.split())
+                    clean_question_words = question_words_set - stop_words
+                    
+                    # Check if all query keywords are present
+                    if clean_query_words and clean_query_words.issubset(clean_question_words):
+                        perfect_matches.append(result)
+                        logger.info(f"  🎯 Perfect match: {result.get('question_text', '')[:60]}... (Score: {result.get('similarity_score', 0):.3f})")
+                    else:
+                        other_results.append(result)
+                
+                # Combine: perfect matches first, then fill with highest scoring others
+                final_results = perfect_matches[:limit]  # Take all perfect matches up to limit
+                remaining_slots = limit - len(final_results)
+                if remaining_slots > 0:
+                    final_results.extend(other_results[:remaining_slots])
+                
+                formatted_results = final_results
+                logger.info(f"🎯 Final selection: {len(perfect_matches)} perfect matches + {len(final_results) - len(perfect_matches)} others")
+            
+            logger.info(f"🎉 Returning {len(formatted_results)} results for query: '{query[:50]}...'")
             
             # Log top results with their scores
             for i, result in enumerate(formatted_results[:3]):
@@ -535,19 +617,22 @@ def initialize_pyq_vector_db(questions: List[PYQQuestion]) -> PYQVectorService:
     return service
 
 if __name__ == "__main__":
-    # Test the vector service
-    from app.utils.pyq_parser import PYQParser
+    # Test the vector service directly (no parser dependency)
+    print("Testing PYQ Vector Service...")
     
-    # Parse questions
-    pyq_dir = "/Users/a0j0agc/Desktop/Personal/Dump/PYQ/MAINS"
-    parser = PYQParser(pyq_dir)
-    questions = parser.parse_all_files()
-    
-    print(f"Parsed {len(questions)} questions")
-    
-    # Initialize vector database
+    # Test with existing service
     try:
-        service = initialize_pyq_vector_db(questions)
+        service = PYQVectorService()
+        print(f"Service created, model loaded: {service.embedding_model is not None}")
+        
+        if service.connect():
+            print("Connected to Milvus")
+            if service.load_collection():
+                print(f"Collection loaded with {service.collection.num_entities} entities")
+            else:
+                print("Failed to load collection")
+        else:
+            print("Failed to connect to Milvus")
         
         # Get stats
         stats = service.get_collection_stats()
