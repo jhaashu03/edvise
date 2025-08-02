@@ -23,6 +23,9 @@ const PYQSearchPage: React.FC = () => {
     year: '',
   });
   const [showFilters, setShowFilters] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [hasMoreResults, setHasMoreResults] = useState(false);
+  const [totalResults, setTotalResults] = useState(0);
 
   const subjects = [
     'General Studies Paper 1',
@@ -35,7 +38,7 @@ const PYQSearchPage: React.FC = () => {
 
   const years = Array.from({ length: 10 }, (_, i) => 2024 - i);
 
-  const handleSearch = async () => {
+  const handleSearch = async (page: number = 1) => {
     if (!query.trim()) return;
 
     setLoading(true);
@@ -43,10 +46,23 @@ const PYQSearchPage: React.FC = () => {
       const searchFilters = {
         ...(filters.subject && { subject: filters.subject }),
         ...(filters.year && { year: parseInt(filters.year) }),
+        page,
+        limit: 10,
       };
 
       const searchResults = await apiService.searchPYQs(query, searchFilters);
-      setResults(searchResults);
+      
+      if (page === 1) {
+        setResults(searchResults);
+        setCurrentPage(1);
+      } else {
+        setResults(searchResults);
+        setCurrentPage(page);
+      }
+      
+      // Check if we have more results (if we got full limit, there might be more)
+      setHasMoreResults(searchResults.length === 10);
+      setTotalResults((page - 1) * 10 + searchResults.length);
     } catch (error) {
       console.error('Search failed:', error);
     } finally {
@@ -56,7 +72,7 @@ const PYQSearchPage: React.FC = () => {
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
-      handleSearch();
+      handleSearch(1);
     }
   };
 
@@ -126,7 +142,7 @@ const PYQSearchPage: React.FC = () => {
               </button>
               
               <button
-                onClick={handleSearch}
+                onClick={() => handleSearch(1)}
                 disabled={loading}
                 className="inline-flex items-center px-8 py-4 border border-transparent text-sm font-semibold rounded-xl shadow-lg text-white bg-gradient-to-r from-primary-500 to-secondary-500 hover:from-primary-600 hover:to-secondary-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 disabled:opacity-50 transition-all duration-200 transform hover:scale-105"
               >
@@ -310,6 +326,50 @@ const PYQSearchPage: React.FC = () => {
               </div>
             </div>
           ))}
+
+          {/* Pagination Controls */}
+          {results.length > 0 && (
+            <div className="ai-card p-6 flex items-center justify-between">
+              <div className="flex items-center space-x-4">
+                <span className="text-sm text-ai-600">
+                  Page {currentPage} • {results.length} results
+                </span>
+                {hasMoreResults && (
+                  <span className="text-xs text-ai-500 bg-ai-100 px-2 py-1 rounded-full">
+                    More available
+                  </span>
+                )}
+              </div>
+              
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => handleSearch(currentPage - 1)}
+                  disabled={currentPage === 1 || loading}
+                  className="inline-flex items-center px-4 py-2 border border-ai-200 rounded-xl text-sm font-medium text-ai-700 bg-white hover:bg-ai-50 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 transform hover:scale-105 disabled:hover:scale-100"
+                >
+                  <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                  </svg>
+                  Previous
+                </button>
+                
+                <span className="text-sm text-ai-600 px-4">
+                  {currentPage}
+                </span>
+                
+                <button
+                  onClick={() => handleSearch(currentPage + 1)}
+                  disabled={!hasMoreResults || loading}
+                  className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-xl text-white bg-gradient-to-r from-primary-500 to-secondary-500 hover:from-primary-600 hover:to-secondary-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 transform hover:scale-105 disabled:hover:scale-100"
+                >
+                  Next
+                  <svg className="w-4 h-4 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          )}
 
           {!loading && results.length === 0 && query && (
             <div className="text-center py-16 ai-card">

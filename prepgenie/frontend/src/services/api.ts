@@ -97,10 +97,11 @@ class ApiService {
   }
 
   // PYQ Search
-  async searchPYQs(query: string, filters?: { subject?: string; year?: number; limit?: number }): Promise<PYQSearchResult[]> {
+  async searchPYQs(query: string, filters?: { subject?: string; year?: number; limit?: number; page?: number }): Promise<PYQSearchResult[]> {
     const searchRequest = {
       query,
       limit: filters?.limit || 10,
+      page: filters?.page || 1,
       ...(filters?.subject && { subject: filters.subject }),
       ...(filters?.year && { year: filters.year }),
     };

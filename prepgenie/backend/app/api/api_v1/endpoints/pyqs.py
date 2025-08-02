@@ -40,9 +40,13 @@ async def search_pyqs(
             
             pyq_vector_service = PYQVectorService()
             if pyq_vector_service.connect() and pyq_vector_service.load_collection():
+                # Calculate offset from page (1-indexed)
+                offset = (search_request.page - 1) * search_request.limit if search_request.page > 1 else 0
+                
                 results = pyq_vector_service.search_questions(
                     query=search_request.query,
-                    limit=search_request.limit
+                    limit=search_request.limit,
+                    offset=offset
                     # Note: We'll add filters back later after testing basic functionality
                 )
                 logger.info(f"PYQ Vector Service returned {len(results)} results")

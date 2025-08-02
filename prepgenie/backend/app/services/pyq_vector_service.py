@@ -56,50 +56,40 @@ class PYQVectorService:
         self.connection_alias = "pyq_default"
         
     def connect(self) -> bool:
-        """Connect to Milvus database"""
+        """Connect to Milvus database using direct connection"""
         try:
-            # Clean disconnect all existing connections to avoid conflicts
+            # Clean disconnect any existing connection to avoid conflicts
             try:
-                # Disconnect our specific alias
-                connections.disconnect(self.connection_alias)
-                logger.info(f"🔄 Disconnected existing connection: {self.connection_alias}")
-            except Exception:
-                pass  # Connection didn't exist, that's fine
-            
-            # Also try to disconnect any default connections that might conflict
-            try:
-                connections.disconnect("default")
+                connections.disconnect("pyq_direct")
             except Exception:
                 pass
             
-            # Use the absolute path to the backend database that has 525 entities
-            # We confirmed this specific file has the data we need
-            backend_db_path = '/Users/a0j0agc/Desktop/Personal/edvise/prepgenie/backend/milvus_lite_local.db'
+            # Use absolute path to the database file
+            backend_db_path = os.path.join(os.getcwd(), "milvus_lite_local.db")
+            if not os.path.exists(backend_db_path):
+                backend_db_path = '/Users/a0j0agc/Desktop/Personal/edvise/prepgenie/backend/milvus_lite_local.db'
             
-            logger.info(f"📍 Current working directory: {os.getcwd()}")
-            logger.info(f"📍 Using ABSOLUTE backend database path: {backend_db_path}")
-            logger.info(f"📍 Backend database exists: {os.path.exists(backend_db_path)}")
+            logger.info(f"📍 Using direct connection to: {backend_db_path}")
+            logger.info(f"📍 Database exists: {os.path.exists(backend_db_path)}")
             
-            full_path = backend_db_path
-            
-            logger.info(f"⚙️ Connecting to Milvus Lite: {full_path}")
-            logger.info(f"📁 Database file exists: {os.path.exists(full_path)}")
-            
+            # Create a direct connection
             connections.connect(
-                alias=self.connection_alias,
-                uri=full_path
+                alias="pyq_direct",
+                uri=backend_db_path
             )
+            self.connection_alias = "pyq_direct"
             
-            # Verify connection by listing collections
-            from pymilvus import utility
-            collections = utility.list_collections(using=self.connection_alias)
-            logger.info(f"📚 Available collections: {collections}")
+            logger.info(f"✅ Successfully connected to Milvus database with alias: {self.connection_alias}")
             
-            if 'pyq_embeddings' not in collections:
-                logger.error(f"❌ Collection 'pyq_embeddings' not found in {collections}")
-                return False
+            # List all collections
+            collections_list = utility.list_collections(using=self.connection_alias)
+            logger.info(f"📚 Available collections: {collections_list}")
             
-            logger.info(f"✅ Successfully connected to Milvus Lite with pyq_embeddings collection")
+            if self.collection_name not in collections_list:
+                logger.warning(f"⚠️ Collection '{self.collection_name}' not found - will need to be created")
+            else:
+                logger.info(f"✅ Collection '{self.collection_name}' found")
+                
             return True
             
         except Exception as e:
@@ -116,17 +106,17 @@ class PYQVectorService:
                 utility.drop_collection(self.collection_name, using=self.connection_alias)
                 logger.info(f"Dropped existing collection: {self.collection_name}")
             
-            # Define collection schema
+            # Define collection schema - MUST match imported data schema
             fields = [
                 FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
-                FieldSchema(name="question_id", dtype=DataType.VARCHAR, max_length=100),
-                FieldSchema(name="question_text", dtype=DataType.VARCHAR, max_length=4000),
-                FieldSchema(name="year", dtype=DataType.INT64),
-                FieldSchema(name="paper", dtype=DataType.VARCHAR, max_length=50),
+                FieldSchema(name="pyq_id", dtype=DataType.INT64),  # Changed from question_id
+                FieldSchema(name="question_text", dtype=DataType.VARCHAR, max_length=65535),
                 FieldSchema(name="subject", dtype=DataType.VARCHAR, max_length=100),
-                FieldSchema(name="word_limit", dtype=DataType.INT64),
+                FieldSchema(name="year", dtype=DataType.INT64),
+                FieldSchema(name="paper", dtype=DataType.VARCHAR, max_length=100),
+                FieldSchema(name="topics", dtype=DataType.VARCHAR, max_length=1000),  # Changed from tags
+                FieldSchema(name="difficulty", dtype=DataType.VARCHAR, max_length=50),  # Added
                 FieldSchema(name="marks", dtype=DataType.INT64),
-                FieldSchema(name="tags", dtype=DataType.VARCHAR, max_length=500),
                 FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=self.embedding_dim)
             ]
             
@@ -238,55 +228,258 @@ class PYQVectorService:
             return np.array([])
     
     def calculate_keyword_score(self, query: str, question_text: str) -> float:
-        """Calculate keyword-based similarity score with improved direct matching"""
+        """Enhanced keyword-based similarity score for better relevance matching"""
         try:
-            query_words = set(query.lower().split())
-            question_words = set(question_text.lower().split())
+            query_lower = query.lower()
+            question_lower = question_text.lower()
             
-            # Remove common stop words
+            # Split into words and remove stop words
+            query_words = set(query_lower.split())
+            question_words = set(question_lower.split())
+            
             stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should'}
-            query_words = query_words - stop_words
-            question_words = question_words - stop_words
+            clean_query_words = query_words - stop_words
+            clean_question_words = question_words - stop_words
             
-            if not query_words or not question_words:
+            if not clean_query_words:
                 return 0.0
             
-            # Calculate word coverage (how many query words are in question)
-            intersection = len(query_words & question_words)
-            coverage_score = intersection / len(query_words) if query_words else 0.0
+            # Enhanced keyword matching for better relevance
+            matched_words = clean_query_words.intersection(clean_question_words)
             
-            # Boost for exact phrase matches
+            if not matched_words:
+                return 0.0
+                
+            # Base score: coverage of query words
+            coverage_score = len(matched_words) / len(clean_query_words)
+            
+            # Aggressive phrase matching
             phrase_bonus = 0.0
-            query_lower = query.lower()
-            text_lower = question_text.lower()
+            query_words_list = query_lower.split()
+            
+            # Check for exact phrase matches (very high bonus)
+            if query_lower in question_lower:
+                phrase_bonus += 1.5  # Massive bonus for exact query match
             
             # Check for 2-word and 3-word phrase matches
-            query_words_list = query_lower.split()
             for i in range(len(query_words_list) - 1):
                 bigram = ' '.join(query_words_list[i:i+2])
-                if bigram in text_lower:
-                    phrase_bonus += 0.4  # Increased from 0.3
+                if bigram in question_lower:
+                    phrase_bonus += 0.6  # Higher bonus for bigrams
                     
             for i in range(len(query_words_list) - 2):
                 trigram = ' '.join(query_words_list[i:i+3])
-                if trigram in text_lower:
-                    phrase_bonus += 0.6  # Increased from 0.5
+                if trigram in question_lower:
+                    phrase_bonus += 0.8  # Higher bonus for trigrams
             
-            # Special bonus for complete keyword coverage
+            # Special bonuses for important keywords
+            important_keywords = ['women', 'woman', 'leadership', 'leader', 'governance', 'empowerment', 'gender']
+            keyword_bonus = 0.0
+            for keyword in important_keywords:
+                if keyword in query_lower and keyword in question_lower:
+                    keyword_bonus += 0.5  # Big bonus for important keywords
+            
+            # Complete match bonus
             complete_match_bonus = 0.0
             if coverage_score == 1.0:  # All query words found
-                complete_match_bonus = 0.3
+                complete_match_bonus = 0.4
             
-            final_score = coverage_score + phrase_bonus + complete_match_bonus
-            return min(1.0, final_score)
+            final_score = coverage_score + phrase_bonus + keyword_bonus + complete_match_bonus
+            return min(2.0, final_score)  # Allow scores up to 2.0 for very relevant matches
             
         except Exception as e:
             logger.error(f"❌ Keyword scoring error: {e}")
             return 0.0
-    
     def hybrid_score(self, semantic_score: float, keyword_score: float, semantic_weight: float = 0.7) -> float:
-        """Combine semantic and keyword scores"""
-        return semantic_weight * semantic_score + (1 - semantic_weight) * keyword_score
+        """Combine semantic and keyword scores with adaptive weighting"""
+        # Normalize keyword score to be between 0 and 1 (it can go up to 2.0)
+        normalized_keyword = min(1.0, keyword_score / 2.0)
+        
+        # If semantic score is very low (< 0.15), it's likely random embeddings
+        # In that case, heavily prioritize keyword matching
+        if semantic_score < 0.15 and normalized_keyword > 0.05:
+            # Flip the weights to prioritize keywords
+            hybrid = 0.2 * semantic_score + 0.8 * normalized_keyword
+        else:
+            # For higher semantic scores, use normal weighting
+            hybrid = semantic_weight * semantic_score + (1 - semantic_weight) * normalized_keyword
+        
+        # Ensure final score is between 0 and 1
+        return min(1.0, max(0.0, hybrid))
+    
+    def _convert_topics_to_list(self, topics_str: str) -> list:
+        """Convert topics string to list for Pydantic validation"""
+        try:
+            if isinstance(topics_str, list):
+                return topics_str
+            if isinstance(topics_str, str):
+                # Split by comma and clean up
+                topics_list = [topic.strip() for topic in topics_str.split(',') if topic.strip()]
+                return topics_list if topics_list else ["general"]
+            return ["general"]
+        except Exception as e:
+            logger.warning(f"⚠️ Topics conversion error: {e}")
+            return ["general"]
+    
+    def _expand_query_for_search(self, query: str) -> str:
+        """Use LLM to dynamically expand query for better semantic search"""
+        try:
+            # Use LLM to expand the query with UPSC context
+            expanded_query = self._llm_expand_query(query)
+            if expanded_query and expanded_query != query:
+                logger.info(f"📝 LLM query expansion: '{query}' → expanded with context")
+                return expanded_query
+            else:
+                # Fallback: add basic context prefix
+                return f"UPSC questions about {query}"
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Query expansion error: {e}")
+            return f"UPSC questions about {query}"
+    
+    def _llm_expand_query(self, query: str) -> str:
+        """Use existing LLM service to intelligently expand query for better semantic search"""
+        try:
+            # Try to use LLM service directly with proper async handling
+            import asyncio
+            import threading
+            from concurrent.futures import ThreadPoolExecutor
+            
+            def _run_llm_expansion():
+                """Run LLM expansion in a separate thread with its own event loop"""
+                async def _async_expand():
+                    from app.core.llm_service import get_llm_service
+                    
+                    llm_service = get_llm_service()
+                    
+                    system_prompt = "You are an expert in UPSC examinations. Expand search queries to include related concepts and synonyms for finding relevant UPSC Previous Year Questions."
+                    
+                    user_message = f"""Expand this search query: "{query}"
+
+Include:
+1. Related UPSC concepts
+2. Alternative terminology
+3. Indian governance context
+4. Synonyms and variations
+
+Return only the expanded query text, no explanations."""
+                    
+                    return await llm_service.simple_chat(
+                        user_message=user_message,
+                        system_prompt=system_prompt,
+                        max_tokens=150,
+                        temperature=0.3
+                    )
+                
+                # Create new event loop for this thread
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    return loop.run_until_complete(_async_expand())
+                finally:
+                    loop.close()
+            
+            # Run in separate thread to avoid event loop conflicts
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_run_llm_expansion)
+                expanded = future.result(timeout=30)  # 30 second timeout
+                
+                if expanded and expanded.strip():
+                    logger.info(f"📝 LLM query expansion successful")
+                    return expanded.strip()
+            
+        except Exception as e:
+            logger.warning(f"⚠️ LLM query expansion failed: {e}")
+            
+        # Fallback to simple contextual expansion when LLM is unavailable
+        return f"UPSC questions about {query}, Indian governance, policy implementation, administration"
+    
+    def _llm_generate_keyword_filter(self, query: str) -> str:
+        """Use existing LLM service to generate intelligent Milvus keyword filter expressions"""
+        try:
+            # Try to use LLM service directly with proper async handling
+            import asyncio
+            import threading
+            from concurrent.futures import ThreadPoolExecutor
+            
+            def _run_llm_filter():
+                """Run LLM filter generation in a separate thread with its own event loop"""
+                async def _async_filter():
+                    from app.core.llm_service import get_llm_service
+                    
+                    llm_service = get_llm_service()
+                    
+                    system_prompt = "You generate Milvus database filter expressions for search queries using SQL-like LIKE syntax."
+                    
+                    user_message = f"""Generate a flexible Milvus database filter expression for: "{query}"
+
+Rules:
+1. Use 'question_text like '%word%'' for word matching
+2. Prefer OR conditions over AND to avoid over-filtering
+3. Use parentheses for grouping: (condition1 or condition2)
+4. Include word variations, synonyms, and related terms
+5. Focus on capturing relevant questions, not exact matches
+
+Examples:
+- "women leadership" → "(question_text like '%women%' or question_text like '%female%') and (question_text like '%leadership%' or question_text like '%leader%' or question_text like '%empowerment%' or question_text like '%governance%')"
+- "economic development" → "(question_text like '%economic%' or question_text like '%economy%') and (question_text like '%development%' or question_text like '%growth%' or question_text like '%policy%')"
+
+Prefer broader matches that capture related concepts. Return only the filter expression, no explanations:"""
+                    
+                    return await llm_service.simple_chat(
+                        user_message=user_message,
+                        system_prompt=system_prompt,
+                        max_tokens=100,
+                        temperature=0.2
+                    )
+                
+                # Create new event loop for this thread
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    return loop.run_until_complete(_async_filter())
+                finally:
+                    loop.close()
+            
+            # Run in separate thread to avoid event loop conflicts
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_run_llm_filter)
+                filter_expr = future.result(timeout=30)  # 30 second timeout
+                
+                # Validate the filter expression format
+                if filter_expr and "question_text like" in filter_expr.lower():
+                    logger.info(f"📝 LLM keyword filter generated successfully")
+                    return filter_expr.strip()
+                else:
+                    logger.warning(f"Invalid LLM filter expression: {filter_expr}")
+                
+        except Exception as e:
+            logger.warning(f"⚠️ LLM keyword filter generation failed: {e}")
+            
+        # Fallback to basic keyword filtering when LLM is unavailable
+        words = [word.strip().lower() for word in query.split() if len(word.strip()) > 2]
+        if words:
+            # Create basic AND filter for meaningful words
+            filters = [f"question_text like '%{word}%'" for word in words[:3]]  # Limit to 3 words to avoid overly restrictive filtering
+            return ' and '.join(filters)
+        return None
+    
+    def _build_keyword_filter(self, query: str) -> str:
+        """Use LLM to dynamically build keyword filter for better precision"""
+        try:
+            # Use LLM to generate intelligent keyword filter
+            filter_expression = self._llm_generate_keyword_filter(query)
+            if filter_expression:
+                logger.info(f"📝 LLM keyword filter generated for: '{query}'")
+                return filter_expression
+            
+            return None  # No filter needed
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Keyword filter error: {e}")
+            return None
+    
+
     
     def insert_questions(self, questions: List[PYQQuestion]) -> bool:
         """Insert PYQ questions into Milvus collection"""
@@ -331,6 +524,7 @@ class PYQVectorService:
     def search_questions(self, 
                         query: str, 
                         limit: int = 10,
+                        offset: int = 0,
                         year_filter: Optional[int] = None,
                         subject_filter: Optional[str] = None,
                         paper_filter: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -340,12 +534,10 @@ class PYQVectorService:
             query_words = len(query.split())
             is_simple_keyword_query = query_words <= 3 and not any(word in query.lower() for word in ['what', 'how', 'why', 'explain', 'discuss', 'analyze'])
             
-            # Increase search limit for keyword queries to find perfect matches ranked low
-            if is_simple_keyword_query and limit < 50:
-                search_limit = max(limit * 4, 50)  # At least 4x limit or 50, whichever is higher
-                logger.info(f"🎯 Keyword query detected - expanding search limit from {limit} to {search_limit}")
-            else:
-                search_limit = limit
+            # Increase search limit significantly to get more diverse results
+            # Always search for more results to allow for score-based filtering
+            search_limit = max(limit * 10, 100)  # Search 10x the requested limit, minimum 100
+            logger.info(f"🔍 Expanding search limit from {limit} to {search_limit} for diverse results")
             
             logger.info(f"🔍 Starting search for query: '{query}' with limit: {limit} (search_limit: {search_limit})")
             
@@ -356,16 +548,19 @@ class PYQVectorService:
             
             logger.info(f"📊 Collection entities: {self.collection.num_entities}")
             
-            # Generate query embedding
+            # Generate query embedding with query expansion
             logger.info("🧠 Generating query embedding...")
-            query_embedding = self.generate_embeddings([query])
+            expanded_query = self._expand_query_for_search(query)
+            logger.info(f"🔍 Expanded query: '{expanded_query}'")
+            
+            query_embedding = self.generate_embeddings([expanded_query])
             if query_embedding.size == 0:
                 logger.error("❌ Failed to generate query embedding")
                 return []
             
             logger.info(f"✅ Generated embedding with shape: {query_embedding.shape}")
             
-            # Build search expression (filters)
+            # Build search expression with keyword filtering for better relevance
             search_expr = []
             if year_filter:
                 search_expr.append(f"year == {year_filter}")
@@ -373,6 +568,20 @@ class PYQVectorService:
                 search_expr.append(f"subject like '%{subject_filter}%'")
             if paper_filter:
                 search_expr.append(f"paper == '{paper_filter}'")
+            
+            # Apply keyword filtering for basic queries to ensure relevance
+            keyword_filter = self._build_keyword_filter(query)
+            query_words_count = len(query.strip().split())
+            
+            # Apply keyword filter for single-word queries (like "women") to avoid irrelevant results
+            if keyword_filter and query_words_count <= 2:
+                search_expr.append(keyword_filter)
+                logger.info(f"🎯 Applied keyword filter for basic query: {keyword_filter}")
+            elif keyword_filter:
+                logger.info(f"🔍 Generated but skipped keyword filter for longer query: {keyword_filter}")
+            
+            # For single-word queries, keyword filtering is essential to avoid irrelevant results
+            # For longer queries, semantic search handles relevance better
             
             expr = " and ".join(search_expr) if search_expr else None
             logger.info(f"🔧 Search expression: {expr or 'None (no filters)'}")
@@ -384,17 +593,16 @@ class PYQVectorService:
             # Perform search
             logger.info("🚀 Executing Milvus search...")
             try:
-                # Simplify search - remove filters initially to debug
-                simple_search_params = {"metric_type": "COSINE", "params": {"nprobe": 10}}
+                # Enhanced search with keyword filtering for better relevance
+                enhanced_search_params = {"metric_type": "COSINE", "params": {"nprobe": 10}}
                 
                 results = self.collection.search(
                     data=query_embedding.tolist(),
                     anns_field="embedding",
-                    param=simple_search_params,
+                    param=enhanced_search_params,
                     limit=search_limit,  # Use adaptive limit
-                    # Temporarily remove expr to debug
-                    # expr=expr,
-                    output_fields=["pyq_id", "question_text", "subject", "year"]
+                    expr=expr,  # Enable keyword filtering for better precision
+                    output_fields=["pyq_id", "question_text", "subject", "year", "paper", "topics", "difficulty", "marks"]
                 )
                 logger.info(f"✅ Search completed. Raw results: {len(results)} result sets")
                 if results:
@@ -480,7 +688,7 @@ class PYQVectorService:
                             "subject": hit.entity.get("subject", "General Studies"),
                             "difficulty": hit.entity.get("difficulty", "medium"),
                             "marks": hit.entity.get("marks", 10),  # Default UPSC marks
-                            "topics": hit.entity.get("topics", ["Government", "Policy"]),  # Default topics
+                            "topics": self._convert_topics_to_list(hit.entity.get("topics", "general")),
                             "similarity_score": final_score,  # Use hybrid score
                             "semantic_score": semantic_score,  # Keep semantic for analysis
                             "keyword_score": keyword_score,   # Keep keyword for analysis
@@ -514,38 +722,38 @@ class PYQVectorService:
             # Sort by hybrid score (highest first)
             formatted_results.sort(key=lambda x: x.get('similarity_score', 0), reverse=True)
             
-            # Smart filtering: prioritize perfect keyword matches for simple queries
-            if is_simple_keyword_query and len(formatted_results) > limit:
-                logger.info(f"🎯 Filtering {len(formatted_results)} results down to {limit} with keyword priority")
-                
-                # Separate perfect matches from others
-                perfect_matches = []
-                other_results = []
-                
-                query_words_set = set(query.lower().split())
-                stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
-                clean_query_words = query_words_set - stop_words
-                
-                for result in formatted_results:
-                    question_text = result.get('question_text', '').lower()
-                    question_words_set = set(question_text.split())
-                    clean_question_words = question_words_set - stop_words
-                    
-                    # Check if all query keywords are present
-                    if clean_query_words and clean_query_words.issubset(clean_question_words):
-                        perfect_matches.append(result)
-                        logger.info(f"  🎯 Perfect match: {result.get('question_text', '')[:60]}... (Score: {result.get('similarity_score', 0):.3f})")
-                    else:
-                        other_results.append(result)
-                
-                # Combine: perfect matches first, then fill with highest scoring others
-                final_results = perfect_matches[:limit]  # Take all perfect matches up to limit
-                remaining_slots = limit - len(final_results)
-                if remaining_slots > 0:
-                    final_results.extend(other_results[:remaining_slots])
-                
-                formatted_results = final_results
-                logger.info(f"🎯 Final selection: {len(perfect_matches)} perfect matches + {len(final_results) - len(perfect_matches)} others")
+            # Filter by score threshold - show all results above 1% (0.01) for good relevance
+            score_threshold = 0.01
+            filtered_by_score = []
+            for result in formatted_results:
+                score = result.get('similarity_score', 0)
+                if score >= score_threshold:
+                    filtered_by_score.append(result)
+                else:
+                    logger.debug(f"  ⚠️ Filtered out low score: {score:.3f} - {result.get('question_text', '')[:50]}...")
+            
+            # Log score distribution for debugging
+            all_scores = [r.get('similarity_score', 0) for r in formatted_results]
+            if all_scores:
+                max_score = max(all_scores)
+                min_score = min(all_scores)
+                avg_score = sum(all_scores) / len(all_scores)
+                logger.info(f"📊 Score stats: min={min_score:.3f}, max={max_score:.3f}, avg={avg_score:.3f}")
+            
+            logger.info(f"📊 Score filtering: {len(formatted_results)} → {len(filtered_by_score)} results above {score_threshold*100}%")
+            
+            # Apply pagination with offset and limit
+            total_above_threshold = len(filtered_by_score)
+            start_idx = offset
+            end_idx = offset + limit
+            final_results = filtered_by_score[start_idx:end_idx]
+            
+            # Log pagination summary
+            logger.info(f"📄 Pagination: Showing results {start_idx+1}-{min(end_idx, total_above_threshold)} of {total_above_threshold} total")
+            if total_above_threshold > end_idx:
+                logger.info(f"🔜 More results available: {total_above_threshold - end_idx} remaining")
+            
+            formatted_results = final_results
             
             logger.info(f"🎉 Returning {len(formatted_results)} results for query: '{query[:50]}...'")
             
