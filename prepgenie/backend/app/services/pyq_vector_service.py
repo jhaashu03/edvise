@@ -34,10 +34,18 @@ class PYQVectorService:
         self.use_local = use_local
         self.collection_name = "pyq_embeddings"
         
+        # Result caching for optimized pagination with LRU eviction
+        from collections import OrderedDict
+        self.search_cache = OrderedDict()
+        self.max_cache_size = 50  # Maximum 50 cached queries
+        self.cache_ttl = 300  # 5 minutes cache
+        import time
+        self._time = time
+        
         # For existing collection, we must match the embedding dimension
         # The current collection uses 384-dim embeddings from MiniLM
-        self.model_name = 'all-MiniLM-L6-v2'  # Keep compatible with existing data
-        self.embedding_dim = 384
+        self.model_name = "BAAI/bge-large-en-v1.5"  # Keep compatible with existing data
+        self.embedding_dim = 1024
         logger.info(f"🤖 Using embedding model: {self.model_name} (dim: {self.embedding_dim})")
         
         try:
@@ -64,10 +72,11 @@ class PYQVectorService:
             except Exception:
                 pass
             
-            # Use absolute path to the database file
-            backend_db_path = os.path.join(os.getcwd(), "milvus_lite_local.db")
+            # Use absolute path to the UPDATED database file with 1024-dim embeddings
+            backend_db_path = '/Users/a0j0agc/Desktop/Personal/edvise/prepgenie/backend/milvus_lite_local.db'
             if not os.path.exists(backend_db_path):
-                backend_db_path = '/Users/a0j0agc/Desktop/Personal/edvise/prepgenie/backend/milvus_lite_local.db'
+                # Fallback to current directory
+                backend_db_path = os.path.join(os.getcwd(), "milvus_lite_local.db")
             
             logger.info(f"📍 Using direct connection to: {backend_db_path}")
             logger.info(f"📍 Database exists: {os.path.exists(backend_db_path)}")
@@ -227,85 +236,8 @@ class PYQVectorService:
             logger.error(f"🔍 Traceback: {traceback.format_exc()}")
             return np.array([])
     
-    def calculate_keyword_score(self, query: str, question_text: str) -> float:
-        """Enhanced keyword-based similarity score for better relevance matching"""
-        try:
-            query_lower = query.lower()
-            question_lower = question_text.lower()
-            
-            # Split into words and remove stop words
-            query_words = set(query_lower.split())
-            question_words = set(question_lower.split())
-            
-            stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should'}
-            clean_query_words = query_words - stop_words
-            clean_question_words = question_words - stop_words
-            
-            if not clean_query_words:
-                return 0.0
-            
-            # Enhanced keyword matching for better relevance
-            matched_words = clean_query_words.intersection(clean_question_words)
-            
-            if not matched_words:
-                return 0.0
-                
-            # Base score: coverage of query words
-            coverage_score = len(matched_words) / len(clean_query_words)
-            
-            # Aggressive phrase matching
-            phrase_bonus = 0.0
-            query_words_list = query_lower.split()
-            
-            # Check for exact phrase matches (very high bonus)
-            if query_lower in question_lower:
-                phrase_bonus += 1.5  # Massive bonus for exact query match
-            
-            # Check for 2-word and 3-word phrase matches
-            for i in range(len(query_words_list) - 1):
-                bigram = ' '.join(query_words_list[i:i+2])
-                if bigram in question_lower:
-                    phrase_bonus += 0.6  # Higher bonus for bigrams
-                    
-            for i in range(len(query_words_list) - 2):
-                trigram = ' '.join(query_words_list[i:i+3])
-                if trigram in question_lower:
-                    phrase_bonus += 0.8  # Higher bonus for trigrams
-            
-            # Special bonuses for important keywords
-            important_keywords = ['women', 'woman', 'leadership', 'leader', 'governance', 'empowerment', 'gender']
-            keyword_bonus = 0.0
-            for keyword in important_keywords:
-                if keyword in query_lower and keyword in question_lower:
-                    keyword_bonus += 0.5  # Big bonus for important keywords
-            
-            # Complete match bonus
-            complete_match_bonus = 0.0
-            if coverage_score == 1.0:  # All query words found
-                complete_match_bonus = 0.4
-            
-            final_score = coverage_score + phrase_bonus + keyword_bonus + complete_match_bonus
-            return min(2.0, final_score)  # Allow scores up to 2.0 for very relevant matches
-            
-        except Exception as e:
-            logger.error(f"❌ Keyword scoring error: {e}")
-            return 0.0
-    def hybrid_score(self, semantic_score: float, keyword_score: float, semantic_weight: float = 0.7) -> float:
-        """Combine semantic and keyword scores with adaptive weighting"""
-        # Normalize keyword score to be between 0 and 1 (it can go up to 2.0)
-        normalized_keyword = min(1.0, keyword_score / 2.0)
-        
-        # If semantic score is very low (< 0.15), it's likely random embeddings
-        # In that case, heavily prioritize keyword matching
-        if semantic_score < 0.15 and normalized_keyword > 0.05:
-            # Flip the weights to prioritize keywords
-            hybrid = 0.2 * semantic_score + 0.8 * normalized_keyword
-        else:
-            # For higher semantic scores, use normal weighting
-            hybrid = semantic_weight * semantic_score + (1 - semantic_weight) * normalized_keyword
-        
-        # Ensure final score is between 0 and 1
-        return min(1.0, max(0.0, hybrid))
+    # calculate_keyword_score method removed - BGE-large semantic scores are sufficient
+    # hybrid_score method removed - using pure BGE-large semantic scores
     
     def _convert_topics_to_list(self, topics_str: str) -> list:
         """Convert topics string to list for Pydantic validation"""
@@ -394,67 +326,6 @@ Return only the expanded query text, no explanations."""
         # Fallback to simple contextual expansion when LLM is unavailable
         return f"UPSC questions about {query}, Indian governance, policy implementation, administration"
     
-    def _llm_generate_keyword_filter(self, query: str) -> str:
-        """Use existing LLM service to generate intelligent Milvus keyword filter expressions"""
-        try:
-            # Try to use LLM service directly with proper async handling
-            import asyncio
-            import threading
-            from concurrent.futures import ThreadPoolExecutor
-            
-            def _run_llm_filter():
-                """Run LLM filter generation in a separate thread with its own event loop"""
-                async def _async_filter():
-                    from app.core.llm_service import get_llm_service
-                    
-                    llm_service = get_llm_service()
-                    
-                    system_prompt = "You generate Milvus database filter expressions for search queries using SQL-like LIKE syntax."
-                    
-                    user_message = f"""Generate a flexible Milvus database filter expression for: "{query}"
-
-Rules:
-1. Use 'question_text like '%word%'' for word matching
-2. Prefer OR conditions over AND to avoid over-filtering
-3. Use parentheses for grouping: (condition1 or condition2)
-4. Include word variations, synonyms, and related terms
-5. Focus on capturing relevant questions, not exact matches
-
-Examples:
-- "women leadership" → "(question_text like '%women%' or question_text like '%female%') and (question_text like '%leadership%' or question_text like '%leader%' or question_text like '%empowerment%' or question_text like '%governance%')"
-- "economic development" → "(question_text like '%economic%' or question_text like '%economy%') and (question_text like '%development%' or question_text like '%growth%' or question_text like '%policy%')"
-
-Prefer broader matches that capture related concepts. Return only the filter expression, no explanations:"""
-                    
-                    return await llm_service.simple_chat(
-                        user_message=user_message,
-                        system_prompt=system_prompt,
-                        max_tokens=100,
-                        temperature=0.2
-                    )
-                
-                # Create new event loop for this thread
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    return loop.run_until_complete(_async_filter())
-                finally:
-                    loop.close()
-            
-            # Run in separate thread to avoid event loop conflicts
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_run_llm_filter)
-                filter_expr = future.result(timeout=30)  # 30 second timeout
-                
-                # Validate the filter expression format
-                if filter_expr and "question_text like" in filter_expr.lower():
-                    logger.info(f"📝 LLM keyword filter generated successfully")
-                    return filter_expr.strip()
-                else:
-                    logger.warning(f"Invalid LLM filter expression: {filter_expr}")
-                
-        except Exception as e:
-            logger.warning(f"⚠️ LLM keyword filter generation failed: {e}")
             
         # Fallback to basic keyword filtering when LLM is unavailable
         words = [word.strip().lower() for word in query.split() if len(word.strip()) > 2]
@@ -464,22 +335,130 @@ Prefer broader matches that capture related concepts. Return only the filter exp
             return ' and '.join(filters)
         return None
     
-    def _build_keyword_filter(self, query: str) -> str:
-        """Use LLM to dynamically build keyword filter for better precision"""
+    # _build_keyword_filter method removed - BGE-large-en-v1.5 provides excellent semantic relevance
+    
+    def _llm_rerank_results(self, query: str, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Use LLM to intelligently rerank search results based on relevance to query"""
         try:
-            # Use LLM to generate intelligent keyword filter
-            filter_expression = self._llm_generate_keyword_filter(query)
-            if filter_expression:
-                logger.info(f"📝 LLM keyword filter generated for: '{query}'")
-                return filter_expression
+            if len(results) <= 1:
+                return results
             
-            return None  # No filter needed
+            # Limit to top results for reranking to avoid token limits
+            max_rerank = min(20, len(results))
+            top_results = results[:max_rerank]
+            remaining_results = results[max_rerank:]
+            
+            import asyncio
+            import threading
+            from concurrent.futures import ThreadPoolExecutor
+            
+            def _run_llm_rerank():
+                """Run LLM reranking in a separate thread with its own event loop"""
+                async def _async_rerank():
+                    from app.core.llm_service import get_llm_service
+                    
+                    llm_service = get_llm_service()
+                    
+                    system_prompt = "You are an expert at ranking UPSC questions by relevance to search queries. You understand contextual relevance, thematic connections, and conceptual relationships."
+                    
+                    # Prepare questions for ranking
+                    questions_text = ""
+                    for i, result in enumerate(top_results):
+                        question_preview = result.get('question_text', '')[:200]  # First 200 chars
+                        current_score = result.get('similarity_score', 0)
+                        questions_text += f"{i+1}. [Score: {current_score:.3f}] {question_preview}...\n\n"
+                    
+                    user_message = f"""Rank these UPSC questions by relevance to the query: "{query}"
+
+Questions to rank:
+{questions_text}
+
+Instructions:
+1. Consider conceptual relevance, not just keyword matching
+2. For "{query}", prioritize questions that actually discuss the core concepts
+3. Rank by how well each question addresses the query's intent
+4. Return ONLY the numbers in order of relevance (most relevant first)
+5. Format: 1,3,2,4,5... (comma-separated, no spaces)
+
+Example: If question 3 is most relevant, then 1, then 5: 3,1,5,2,4
+
+Ranking (most to least relevant):"""
+                    
+                    response = await llm_service.simple_chat(
+                        user_message=user_message,
+                        system_message=system_prompt,
+                        temperature=0.1  # Low temperature for consistent ranking
+                    )
+                    
+                    return response.strip()
+                
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    return loop.run_until_complete(_async_rerank())
+                except Exception as e:
+                    logger.warning(f"⚠️ LLM reranking async error: {e}")
+                    return None
+                finally:
+                    try:
+                        loop.close()
+                    except:
+                        pass
+            
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_run_llm_rerank)
+                ranking_response = future.result(timeout=15)  # 15 second timeout
+            
+            if not ranking_response:
+                logger.warning("⚠️ LLM reranking failed - keeping original order")
+                return results
+            
+            # Parse ranking response
+            try:
+                ranking_str = ranking_response.replace(' ', '').strip()
+                if ranking_str:
+                    # Extract numbers from response
+                    ranking_indices = []
+                    for part in ranking_str.split(','):
+                        try:
+                            idx = int(part.strip()) - 1  # Convert to 0-based index
+                            if 0 <= idx < len(top_results):
+                                ranking_indices.append(idx)
+                        except ValueError:
+                            continue
+                    
+                    if ranking_indices:
+                        # Reorder based on LLM ranking
+                        reranked_results = []
+                        used_indices = set()
+                        
+                        # Add questions in LLM-suggested order
+                        for idx in ranking_indices:
+                            if idx not in used_indices:
+                                reranked_results.append(top_results[idx])
+                                used_indices.add(idx)
+                        
+                        # Add any remaining questions that weren't ranked
+                        for idx, result in enumerate(top_results):
+                            if idx not in used_indices:
+                                reranked_results.append(result)
+                        
+                        # Add remaining results that weren't considered for reranking
+                        reranked_results.extend(remaining_results)
+                        
+                        logger.info(f"🎯 LLM reranked {len(ranking_indices)} results for query: '{query}'")
+                        logger.info(f"📊 Reranking order: {ranking_str}")
+                        
+                        return reranked_results
+            
+            except Exception as parse_error:
+                logger.warning(f"⚠️ Failed to parse LLM ranking: {parse_error}")
+            
+            return results
             
         except Exception as e:
-            logger.warning(f"⚠️ Keyword filter error: {e}")
-            return None
-    
-
+            logger.warning(f"⚠️ LLM reranking failed: {e}")
+            return results
     
     def insert_questions(self, questions: List[PYQQuestion]) -> bool:
         """Insert PYQ questions into Milvus collection"""
@@ -521,6 +500,63 @@ Prefer broader matches that capture related concepts. Return only the filter exp
             logger.error(f"Failed to insert questions: {str(e)}")
             return False
     
+    def _map_subject_filter(self, subject_filter: Optional[str]) -> Optional[str]:
+        """Map frontend subject names to database subject values"""
+        if not subject_filter:
+            return None
+            
+        # Mapping from frontend filter names to database subject values
+        subject_mapping = {
+            "General Studies Paper 1": "History, Geography, Society",
+            "General Studies Paper I": "History, Geography, Society",
+            "GS1": "History, Geography, Society",
+            "GS Paper 1": "History, Geography, Society",
+            "History, Geography, Society": "History, Geography, Society",
+            
+            "General Studies Paper 2": "Governance, Constitution, International Relations", 
+            "General Studies Paper II": "Governance, Constitution, International Relations",
+            "GS2": "Governance, Constitution, International Relations",
+            "GS Paper 2": "Governance, Constitution, International Relations", 
+            "Governance, Constitution, International Relations": "Governance, Constitution, International Relations",
+            
+            "General Studies Paper 3": "Economy, Environment, Science & Technology",
+            "General Studies Paper III": "Economy, Environment, Science & Technology",
+            "GS3": "Economy, Environment, Science & Technology",
+            "GS Paper 3": "Economy, Environment, Science & Technology",
+            "Economy, Environment, Science & Technology": "Economy, Environment, Science & Technology",
+            
+            "General Studies Paper 4": "Ethics",  # Assuming GS4 is Ethics
+            "General Studies Paper IV": "Ethics", 
+            "GS4": "Ethics",
+            "GS Paper 4": "Ethics",
+            "Ethics": "Ethics"
+        }
+        
+        # Try exact match first
+        if subject_filter in subject_mapping:
+            mapped_subject = subject_mapping[subject_filter]
+            logger.info(f"🔗 Subject filter mapped: '{subject_filter}' → '{mapped_subject}'")
+            return mapped_subject
+        
+        # If no exact match, try partial matching
+        subject_lower = subject_filter.lower()
+        if "paper 1" in subject_lower or "gs1" in subject_lower:
+            logger.info(f"🔗 Subject filter mapped (partial): '{subject_filter}' → 'History, Geography, Society'")
+            return "History, Geography, Society"
+        elif "paper 2" in subject_lower or "gs2" in subject_lower:
+            logger.info(f"🔗 Subject filter mapped (partial): '{subject_filter}' → 'Governance, Constitution, International Relations'")
+            return "Governance, Constitution, International Relations"
+        elif "paper 3" in subject_lower or "gs3" in subject_lower:
+            logger.info(f"🔗 Subject filter mapped (partial): '{subject_filter}' → 'Economy, Environment, Science & Technology'")
+            return "Economy, Environment, Science & Technology"
+        elif "paper 4" in subject_lower or "gs4" in subject_lower:
+            logger.info(f"🔗 Subject filter mapped (partial): '{subject_filter}' → 'Ethics'")
+            return "Ethics"
+        
+        # If no mapping found, use as-is and log warning
+        logger.warning(f"⚠️ No subject mapping found for: '{subject_filter}' - using as-is")
+        return subject_filter
+
     def search_questions(self, 
                         query: str, 
                         limit: int = 10,
@@ -528,8 +564,32 @@ Prefer broader matches that capture related concepts. Return only the filter exp
                         year_filter: Optional[int] = None,
                         subject_filter: Optional[str] = None,
                         paper_filter: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Search for similar questions using vector similarity"""
+        """Search for similar questions using vector similarity with result caching"""
         try:
+            # Map subject filter to database values
+            mapped_subject_filter = self._map_subject_filter(subject_filter)
+            # ⚡ CACHING OPTIMIZATION: Check if we have cached results
+            filters = {
+                'year_filter': year_filter,
+                'subject_filter': mapped_subject_filter, 
+                'paper_filter': paper_filter
+            }
+            cache_key = self._generate_cache_key(query, filters)
+            logger.info(f"🔑 Cache key for query='{query}' filters={filters}: {cache_key[:16]}...")
+            
+            if cache_key in self.search_cache:
+                cached_data = self.search_cache[cache_key]
+                if self._is_cache_valid(cached_data):
+                    # Move to end for LRU ordering
+                    self.search_cache.move_to_end(cache_key)
+                    logger.info(f"⚡ Using cached results for pagination - NO DB/LLM calls!")
+                    return self._slice_results(cached_data['results'], offset, limit)
+                else:
+                    # Remove expired cache
+                    del self.search_cache[cache_key]
+            
+            logger.info(f"🔍 Full search with caching - DB + LLM calls required")
+            
             # Adaptive limit for keyword queries to ensure perfect matches are found
             query_words = len(query.split())
             is_simple_keyword_query = query_words <= 3 and not any(word in query.lower() for word in ['what', 'how', 'why', 'explain', 'discuss', 'analyze'])
@@ -564,24 +624,13 @@ Prefer broader matches that capture related concepts. Return only the filter exp
             search_expr = []
             if year_filter:
                 search_expr.append(f"year == {year_filter}")
-            if subject_filter:
-                search_expr.append(f"subject like '%{subject_filter}%'")
+            if mapped_subject_filter:
+                search_expr.append(f"subject == '{mapped_subject_filter}'")
             if paper_filter:
                 search_expr.append(f"paper == '{paper_filter}'")
             
-            # Apply keyword filtering for basic queries to ensure relevance
-            keyword_filter = self._build_keyword_filter(query)
-            query_words_count = len(query.strip().split())
-            
-            # Apply keyword filter for single-word queries (like "women") to avoid irrelevant results
-            if keyword_filter and query_words_count <= 2:
-                search_expr.append(keyword_filter)
-                logger.info(f"🎯 Applied keyword filter for basic query: {keyword_filter}")
-            elif keyword_filter:
-                logger.info(f"🔍 Generated but skipped keyword filter for longer query: {keyword_filter}")
-            
-            # For single-word queries, keyword filtering is essential to avoid irrelevant results
-            # For longer queries, semantic search handles relevance better
+            # BGE-large handles semantic relevance excellently - no keyword filtering needed
+            logger.info("🧠 Using pure semantic search with BGE-large-en-v1.5")
             
             expr = " and ".join(search_expr) if search_expr else None
             logger.info(f"🔧 Search expression: {expr or 'None (no filters)'}")
@@ -655,24 +704,10 @@ Prefer broader matches that capture related concepts. Return only the filter exp
                         
                         semantic_score = float(hit.score)
                         
-                        # Calculate keyword score
-                        keyword_score = self.calculate_keyword_score(query, question_text)
+                        # BGE-large provides excellent semantic scores - no hybrid scoring needed
+                        final_score = semantic_score  # Pure semantic scoring with BGE-large
                         
-                        # Dynamic weighting: if query is simple keywords, boost keyword weight
-                        query_words = len(query.split())
-                        is_simple_keyword_query = query_words <= 3 and not any(word in query.lower() for word in ['what', 'how', 'why', 'explain', 'discuss', 'analyze'])
-                        
-                        if is_simple_keyword_query and keyword_score > 0.7:
-                            # High keyword match for simple query - boost keyword weight
-                            semantic_weight = 0.4  # 40% semantic, 60% keyword
-                            logger.info(f"    🎯 Simple keyword query detected - boosting keyword weight")
-                        else:
-                            semantic_weight = 0.7  # Default: 70% semantic, 30% keyword
-                        
-                        # Calculate hybrid score
-                        final_score = self.hybrid_score(semantic_score, keyword_score, semantic_weight=semantic_weight)
-                        
-                        logger.info(f"    📊 Scores - Semantic: {semantic_score:.4f}, Keyword: {keyword_score:.4f}, Hybrid: {final_score:.4f}")
+                        logger.info(f"    📊 BGE-large Semantic Score: {semantic_score:.4f} (Pure semantic, no keyword boost needed)")
                         
                         # Enhanced result format with hybrid scoring - match frontend types
                         # Ensure question field is properly set
@@ -689,9 +724,8 @@ Prefer broader matches that capture related concepts. Return only the filter exp
                             "difficulty": hit.entity.get("difficulty", "medium"),
                             "marks": hit.entity.get("marks", 10),  # Default UPSC marks
                             "topics": self._convert_topics_to_list(hit.entity.get("topics", "general")),
-                            "similarity_score": final_score,  # Use hybrid score
+                            "similarity_score": final_score,  # Pure BGE-large semantic score
                             "semantic_score": semantic_score,  # Keep semantic for analysis
-                            "keyword_score": keyword_score,   # Keep keyword for analysis
                             "distance": 1.0 - final_score
                         }
                         formatted_results.append(result)
@@ -742,6 +776,28 @@ Prefer broader matches that capture related concepts. Return only the filter exp
             
             logger.info(f"📊 Score filtering: {len(formatted_results)} → {len(filtered_by_score)} results above {score_threshold*100}%")
             
+            # Apply LLM reranking for better relevance (before pagination)
+            if len(filtered_by_score) > 1:
+                logger.info(f"🤖 Applying LLM reranking for query: '{query}'")
+                filtered_by_score = self._llm_rerank_results(query, filtered_by_score)
+                logger.info(f"✨ LLM reranking completed")
+            
+            # ⚡ CACHE RESULTS: Store for future pagination (after all processing)
+            self.search_cache[cache_key] = {
+                'results': filtered_by_score,
+                'timestamp': self._time.time(),
+                'query': query,
+                'total_results': len(filtered_by_score)
+            }
+            
+            # LRU eviction: Remove oldest entries if cache is full
+            while len(self.search_cache) > self.max_cache_size:
+                oldest_key = next(iter(self.search_cache))
+                del self.search_cache[oldest_key]
+                logger.info(f"🧹 Evicted oldest cache entry: {oldest_key[:16]}...")
+            
+            logger.info(f"💾 Cached {len(filtered_by_score)} results for future pagination ({len(self.search_cache)}/{self.max_cache_size} cache slots)")
+            
             # Apply pagination with offset and limit
             total_above_threshold = len(filtered_by_score)
             start_idx = offset
@@ -757,9 +813,20 @@ Prefer broader matches that capture related concepts. Return only the filter exp
             
             logger.info(f"🎉 Returning {len(formatted_results)} results for query: '{query[:50]}...'")
             
+            # Debug: Show years in final results to detect mixed-year bugs
+            if formatted_results:
+                years_in_results = [str(r.get('year', 'Unknown')) for r in formatted_results]
+                unique_years = list(set(years_in_results))
+                logger.info(f"📅 Years in final results: {unique_years} (Expected: {[str(year_filter)] if year_filter else 'Any year'})")
+                if year_filter and str(year_filter) not in unique_years:
+                    logger.warning(f"⚠️ POTENTIAL BUG: Expected year {year_filter} not found in results!")
+                if year_filter and len(unique_years) > 1:
+                    logger.warning(f"⚠️ POTENTIAL BUG: Multiple years found when filtering for {year_filter}: {unique_years}")
+            
             # Log top results with their scores
             for i, result in enumerate(formatted_results[:3]):
-                logger.info(f"  🏆 Top {i+1}: Score={result.get('similarity_score', 0):.4f} - {result.get('question_text', '')[:60]}...")
+                year_info = result.get('year', 'Unknown')
+                logger.info(f"  🏆 Top {i+1}: Score={result.get('similarity_score', 0):.4f}, Year={year_info} - {result.get('question_text', '')[:60]}...")
             
             return formatted_results
             
@@ -797,6 +864,20 @@ Prefer broader matches that capture related concepts. Return only the filter exp
         except Exception as e:
             logger.error(f"Failed to delete collection: {str(e)}")
             return False
+    
+    def _generate_cache_key(self, query: str, filters: dict) -> str:
+        """Generate unique cache key for query + filters"""
+        import hashlib
+        key_data = f"{query}_{str(sorted(filters.items()))}"
+        return hashlib.md5(key_data.encode()).hexdigest()
+    
+    def _is_cache_valid(self, cached_data: dict) -> bool:
+        """Check if cached data is still valid"""
+        return (self._time.time() - cached_data['timestamp']) < self.cache_ttl
+    
+    def _slice_results(self, results: list, offset: int, limit: int) -> list:
+        """Slice results for pagination"""
+        return results[offset:offset + limit]
 
 def initialize_pyq_vector_db(questions: List[PYQQuestion]) -> PYQVectorService:
     """Initialize PYQ vector database with questions"""

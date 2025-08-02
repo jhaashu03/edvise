@@ -14,6 +14,9 @@ import json
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+# Global singleton instance for caching across requests
+_pyq_vector_service_instance = None
+
 @router.post("/search", response_model=List[PYQSearchResult])
 async def search_pyqs(
     search_request: PYQSearchRequest,
@@ -35,19 +38,27 @@ async def search_pyqs(
             if search_request.difficulty:
                 filters["difficulty"] = search_request.difficulty
             
-            # Perform semantic search using PYQVectorService
+            # Perform semantic search using PYQVectorService (singleton pattern)
             from app.services.pyq_vector_service import PYQVectorService
             
-            pyq_vector_service = PYQVectorService()
-            if pyq_vector_service.connect() and pyq_vector_service.load_collection():
+            # Use singleton pattern to maintain cache across requests
+            global _pyq_vector_service_instance
+            if '_pyq_vector_service_instance' not in globals() or _pyq_vector_service_instance is None:
+                _pyq_vector_service_instance = PYQVectorService()
+                if not (_pyq_vector_service_instance.connect() and _pyq_vector_service_instance.load_collection()):
+                    _pyq_vector_service_instance = None
+                    
+            pyq_vector_service = _pyq_vector_service_instance
+            if pyq_vector_service is not None:
                 # Calculate offset from page (1-indexed)
                 offset = (search_request.page - 1) * search_request.limit if search_request.page > 1 else 0
                 
                 results = pyq_vector_service.search_questions(
                     query=search_request.query,
                     limit=search_request.limit,
-                    offset=offset
-                    # Note: We'll add filters back later after testing basic functionality
+                    offset=offset,
+                    year_filter=search_request.year,
+                    subject_filter=search_request.subject
                 )
                 logger.info(f"PYQ Vector Service returned {len(results)} results")
             else:

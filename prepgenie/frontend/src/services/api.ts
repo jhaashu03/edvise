@@ -102,10 +102,12 @@ class ApiService {
       query,
       limit: filters?.limit || 10,
       page: filters?.page || 1,
+      timestamp: Date.now(), // Cache busting
       ...(filters?.subject && { subject: filters.subject }),
       ...(filters?.year && { year: filters.year }),
     };
 
+    console.log('📡 API: Sending search request:', searchRequest);
     const response: AxiosResponse<PYQSearchResult[]> = await this.api.post('/pyqs/search', searchRequest);
     return response.data; // Backend returns array directly, not nested in 'data' property
   }

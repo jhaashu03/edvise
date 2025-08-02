@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiService } from '../services/api';
 import { PYQSearchResult } from '../types';
@@ -26,6 +26,9 @@ const PYQSearchPage: React.FC = () => {
   const [currentPage, setCurrentPage] = useState(1);
   const [hasMoreResults, setHasMoreResults] = useState(false);
   const [totalResults, setTotalResults] = useState(0);
+  
+  // Ref to prevent concurrent search conflicts
+  const isAutoSearchingRef = useRef(false);
 
   const subjects = [
     'General Studies Paper 1',
@@ -38,10 +41,61 @@ const PYQSearchPage: React.FC = () => {
 
   const years = Array.from({ length: 10 }, (_, i) => 2024 - i);
 
+  // Auto-search when filters change (only if there's already a query and results)
+  useEffect(() => {
+    if (query.trim() && results.length > 0 && !isAutoSearchingRef.current) {
+      console.log('🔄 Frontend: Filters changed, auto-triggering search...');
+      console.log('📊 Frontend: New filters:', filters);
+      
+      // Use a small debounce to prevent rapid filter changes from causing multiple searches
+      const debounceTimer = setTimeout(() => {
+        // Trigger new search with current query and new filters
+        const performSearch = async () => {
+          isAutoSearchingRef.current = true;
+          setLoading(true);
+          
+          try {
+            const searchFilters = {
+              ...(filters.subject && { subject: filters.subject }),
+              ...(filters.year && { year: parseInt(filters.year) }),
+              page: 1,
+              limit: 10,
+            };
+            
+            console.log('📤 Frontend: Auto-search API request filters:', searchFilters);
+            const searchResults = await apiService.searchPYQs(query, searchFilters);
+            console.log(`📥 Frontend: Auto-search received ${searchResults.length} results`);
+            
+            // Always update results for auto-search to ensure consistency
+            setResults(searchResults);
+            setCurrentPage(1);
+            setHasMoreResults(searchResults.length === 10);
+            setTotalResults(searchResults.length);
+          } catch (error) {
+            console.error('Auto-search failed:', error);
+          } finally {
+            setLoading(false);
+            isAutoSearchingRef.current = false;
+          }
+        };
+        
+        performSearch();
+      }, 200); // Slightly longer debounce for smoother experience
+      
+      // Cleanup function to cancel pending searches
+      return () => {
+        clearTimeout(debounceTimer);
+        isAutoSearchingRef.current = false;
+      };
+    }
+  }, [filters.subject, filters.year]); // Only trigger on filter changes, not query changes
+
   const handleSearch = async (page: number = 1) => {
     if (!query.trim()) return;
 
     setLoading(true);
+    console.log(`🔍 Frontend: Searching page ${page} for query: "${query}"`);
+    
     try {
       const searchFilters = {
         ...(filters.subject && { subject: filters.subject }),
@@ -50,17 +104,23 @@ const PYQSearchPage: React.FC = () => {
         limit: 10,
       };
 
+      console.log('📤 Frontend: API request filters:', searchFilters);
       const searchResults = await apiService.searchPYQs(query, searchFilters);
+      console.log(`📥 Frontend: Received ${searchResults.length} results for page ${page}`);
       
-      if (page === 1) {
-        setResults(searchResults);
-        setCurrentPage(1);
-      } else {
-        setResults(searchResults);
-        setCurrentPage(page);
+      if (searchResults.length > 0) {
+        const firstResult = searchResults[0];
+        const lastResult = searchResults[searchResults.length - 1];
+        console.log(`📝 Frontend: First result: ${firstResult.question?.substring(0, 50)}...`);
+        console.log(`📝 Frontend: Last result: ${lastResult.question?.substring(0, 50)}...`);
       }
       
-      // Check if we have more results (if we got full limit, there might be more)
+      // Always update results and page - this was correct
+      setResults(searchResults);
+      setCurrentPage(page);
+      
+      // Better logic for hasMoreResults: assume more if we got exactly 10 results
+      // In a real app, the backend should return total count
       setHasMoreResults(searchResults.length === 10);
       setTotalResults((page - 1) * 10 + searchResults.length);
     } catch (error) {
@@ -207,7 +267,18 @@ const PYQSearchPage: React.FC = () => {
         </div>
 
         {/* AI-Enhanced Results */}
-        <div className="space-y-6">
+        <div className="space-y-6 relative">
+          {/* Subtle loading overlay during filter changes */}
+          {loading && results.length > 0 && (
+            <div className="absolute inset-0 bg-white/60 backdrop-blur-sm z-10 flex items-center justify-center rounded-lg">
+              <div className="ai-card p-4 shadow-lg">
+                <div className="flex items-center space-x-3">
+                  <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-primary-500"></div>
+                  <span className="text-sm font-medium text-ai-700">Updating results...</span>
+                </div>
+              </div>
+            </div>
+          )}
           {results.length > 0 && (
             <div className="flex items-center justify-between ai-card p-4">
               <div className="flex items-center">
@@ -227,7 +298,7 @@ const PYQSearchPage: React.FC = () => {
 
           {results.map((pyq, index) => (
             <div 
-              key={pyq.id} 
+              key={`${pyq.id}-${filters.subject}-${filters.year}`}
               className="ai-card p-6 hover:shadow-2xl transition-all duration-300 transform hover:scale-[1.02] relative overflow-hidden group"
               style={{ animationDelay: `${index * 0.1}s` }}
             >
