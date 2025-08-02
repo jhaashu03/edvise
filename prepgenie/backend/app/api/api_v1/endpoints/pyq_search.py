@@ -7,21 +7,27 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import logging
 from app.services.pyq_vector_service import PYQVectorService, PYQQuestion
+from app.services.advanced_pyq_search import AdvancedPYQSearch, create_advanced_pyq_search, initialize_advanced_search
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Global service instance
+# Global service instances
 pyq_service: Optional[PYQVectorService] = None
+advanced_pyq_service: Optional[AdvancedPYQSearch] = None
 
 # Request/Response Models
 class PYQSearchRequest(BaseModel):
     """Request model for PYQ search"""
     query: str = Field(..., min_length=3, max_length=500, description="Search query")
-    limit: int = Field(default=10, ge=1, le=50, description="Number of results to return")
+    limit: int = Field(default=10, ge=1, le=50, description="Number of results to return per page")
+    offset: int = Field(default=0, ge=0, description="Number of results to skip (for pagination)")
+    min_score_threshold: float = Field(default=0.1, ge=0.0, le=1.0, description="Minimum similarity score threshold (default 10%)")
     year_filter: Optional[int] = Field(None, ge=2013, le=2024, description="Filter by specific year")
     subject_filter: Optional[str] = Field(None, max_length=100, description="Filter by subject")
     paper_filter: Optional[str] = Field(None, description="Filter by paper (GS1, GS2, GS3, GS4_Ethics)")
+    strategy: str = Field(default="enhanced", description="Search strategy: basic, enhanced, premium")
+    semantic_search_only: Optional[bool] = Field(default=False, description="Use semantic search only (backward compatibility)")
 
 class PYQSearchResult(BaseModel):
     """Single PYQ search result"""
@@ -37,6 +43,12 @@ class PYQSearchResult(BaseModel):
     tags: List[str]
     similarity_score: float
     distance: float
+    # Advanced search metadata
+    semantic_rerank_score: Optional[float] = None
+    combined_score: Optional[float] = None
+    search_strategy: Optional[str] = None
+    enhanced_processed: Optional[bool] = None
+    diversity_applied: Optional[bool] = None
 
 class PYQSearchResponse(BaseModel):
     """Response model for PYQ search"""
@@ -45,6 +57,8 @@ class PYQSearchResponse(BaseModel):
     query: str
     filters: Dict[str, Any]
     processing_time_ms: float
+    # Pagination metadata
+    pagination: Dict[str, Any]
 
 class PYQStatsResponse(BaseModel):
     """Response model for PYQ statistics"""
@@ -75,6 +89,33 @@ def get_pyq_service() -> PYQVectorService:
         if not pyq_service.load_collection():
             raise HTTPException(status_code=500, detail="Failed to load PYQ collection")
     return pyq_service
+
+def get_advanced_pyq_service() -> AdvancedPYQSearch:
+    """Get the Advanced PYQ service initialized in main.py"""
+    global advanced_pyq_service
+    
+    # Try to get the service initialized in main.py
+    try:
+        import app.api.api_v1.endpoints.advanced_search as advanced_search_module
+        if hasattr(advanced_search_module, 'advanced_search_service') and advanced_search_module.advanced_search_service is not None:
+            logger.info("✅ Using Advanced PYQ service initialized in main.py")
+            return advanced_search_module.advanced_search_service
+    except Exception as e:
+        logger.warning(f"⚠️ Could not get advanced service from main.py: {e}")
+    
+    # Fallback: create basic advanced service without enhanced features
+    if advanced_pyq_service is None:
+        try:
+            logger.info("🚀 Creating basic Advanced PYQ Search Service...")
+            advanced_pyq_service = create_advanced_pyq_search()
+            logger.info("✅ Basic Advanced PYQ service created (enhanced features may not be available)")
+        except Exception as e:
+            logger.error(f"❌ Failed to create Advanced PYQ service: {e}")
+            logger.info("Falling back to basic PYQ service")
+            # Return basic service as fallback
+            raise Exception("Advanced service not available")
+            
+    return advanced_pyq_service
 
 @router.post("/initialize", response_model=InitializationResponse)
 async def initialize_pyq_database():
@@ -115,21 +156,53 @@ async def initialize_pyq_database():
 
 @router.post("/search", response_model=PYQSearchResponse)
 async def search_pyq_questions(search_request: PYQSearchRequest):
-    """Search PYQ questions using semantic vector search"""
+    """Search PYQ questions using advanced semantic vector search"""
     import time
     start_time = time.time()
     
     try:
-        service = get_pyq_service()
+        # Calculate search limit for pagination (get more results to apply threshold and pagination)
+        search_limit = min(search_request.limit + search_request.offset + 50, 200)  # Get extra results for filtering
         
-        # Perform search
-        results = service.search_questions(
-            query=search_request.query,
-            limit=search_request.limit,
-            year_filter=search_request.year_filter,
-            subject_filter=search_request.subject_filter,
-            paper_filter=search_request.paper_filter
-        )
+        # Try to use advanced service first, fallback to basic if needed
+        try:
+            advanced_service = get_advanced_pyq_service()
+            logger.info(f"🔍 Using advanced search with strategy: {search_request.strategy}, limit: {search_limit}")
+            
+            # Use advanced search with strategy (get more results for pagination)
+            all_results = advanced_service.search_questions_advanced(
+                query=search_request.query,
+                limit=search_limit,
+                strategy=search_request.strategy,
+                year_filter=search_request.year_filter,
+                subject_filter=search_request.subject_filter,
+                paper_filter=search_request.paper_filter
+            )
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Advanced search failed, falling back to basic: {e}")
+            # Fallback to basic service
+            service = get_pyq_service()
+            all_results = service.search_questions(
+                query=search_request.query,
+                limit=search_limit,
+                year_filter=search_request.year_filter,
+                subject_filter=search_request.subject_filter,
+                paper_filter=search_request.paper_filter
+            )
+        
+        # Apply score threshold filtering
+        filtered_results = [
+            result for result in all_results 
+            if result.get("similarity_score", 0) >= search_request.min_score_threshold or 
+               result.get("combined_score", 0) >= search_request.min_score_threshold
+        ]
+        
+        # Apply pagination
+        total_filtered = len(filtered_results)
+        paginated_results = filtered_results[search_request.offset:search_request.offset + search_request.limit]
+        
+        logger.info(f"📊 Pagination: {len(all_results)} total -> {total_filtered} after threshold -> {len(paginated_results)} after pagination")
         
         # Convert to response format
         search_results = [
@@ -145,23 +218,48 @@ async def search_pyq_questions(search_request: PYQSearchRequest):
                 marks=result["marks"] if result["marks"] > 0 else None,
                 tags=result.get("topics", []),  # Use topics field from our search results
                 similarity_score=result["similarity_score"],
-                distance=result["distance"]
+                distance=result["distance"],
+                # Advanced search metadata (if available)
+                semantic_rerank_score=result.get("semantic_rerank_score"),
+                combined_score=result.get("combined_score"),
+                search_strategy=result.get("search_strategy"),
+                enhanced_processed=result.get("enhanced_processed"),
+                diversity_applied=result.get("diversity_applied")
             )
-            for result in results
+            for result in paginated_results  # Use paginated results
         ]
         
         processing_time = (time.time() - start_time) * 1000
         
+        # Calculate pagination metadata
+        current_page = (search_request.offset // search_request.limit) + 1
+        total_pages = (total_filtered + search_request.limit - 1) // search_request.limit  # Ceiling division
+        has_next = search_request.offset + search_request.limit < total_filtered
+        has_previous = search_request.offset > 0
+        
         return PYQSearchResponse(
             results=search_results,
-            total_found=len(search_results),
+            total_found=total_filtered,  # Total after threshold filtering
             query=search_request.query,
             filters={
                 "year": search_request.year_filter,
                 "subject": search_request.subject_filter,
-                "paper": search_request.paper_filter
+                "paper": search_request.paper_filter,
+                "strategy": search_request.strategy,
+                "semantic_search_only": search_request.semantic_search_only,
+                "min_score_threshold": search_request.min_score_threshold
             },
-            processing_time_ms=processing_time
+            processing_time_ms=processing_time,
+            pagination={
+                "current_page": current_page,
+                "total_pages": total_pages,
+                "page_size": search_request.limit,
+                "offset": search_request.offset,
+                "has_next": has_next,
+                "has_previous": has_previous,
+                "total_results_after_threshold": total_filtered,
+                "results_on_current_page": len(search_results)
+            }
         )
         
     except Exception as e:

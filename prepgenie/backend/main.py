@@ -61,6 +61,35 @@ async def lifespan(app: FastAPI):
         # Continue startup even if vector service fails to connect
         # The endpoints will handle connection retries
     
+    # Initialize advanced search service
+    try:
+        from app.services.advanced_pyq_search import create_advanced_pyq_search, initialize_advanced_search
+        logger.info("🚀 Starting advanced search service initialization...")
+        
+        # Create advanced search service instance
+        advanced_search_service = create_advanced_pyq_search()
+        
+        # Initialize with timeout (enhanced features may fail due to SSL issues)
+        success = await asyncio.wait_for(
+            initialize_advanced_search(advanced_search_service, model_type='domain_specific'),
+            timeout=15.0
+        )
+        
+        if success:
+            logger.info("✅ Advanced search service initialized successfully with enhanced features")
+        else:
+            logger.warning("⚠️ Advanced search service initialized with basic features only")
+            
+        # Store service instance globally for endpoints
+        import app.api.api_v1.endpoints.advanced_search as advanced_search_module
+        advanced_search_module.advanced_search_service = advanced_search_service
+        
+    except asyncio.TimeoutError:
+        logger.warning("⏰ Advanced search initialization timed out, service will use basic features")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize advanced search service: {e}")
+        logger.info("Advanced search endpoints will return unavailable status")
+    
     yield
     
     # Shutdown
