@@ -7,14 +7,12 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import logging
 from app.services.pyq_vector_service import PYQVectorService, PYQQuestion
-from app.services.advanced_pyq_search import AdvancedPYQSearch, create_advanced_pyq_search, initialize_advanced_search
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Global service instances
 pyq_service: Optional[PYQVectorService] = None
-advanced_pyq_service: Optional[AdvancedPYQSearch] = None
 
 # Request/Response Models
 class PYQSearchRequest(BaseModel):
@@ -90,32 +88,7 @@ def get_pyq_service() -> PYQVectorService:
             raise HTTPException(status_code=500, detail="Failed to load PYQ collection")
     return pyq_service
 
-def get_advanced_pyq_service() -> AdvancedPYQSearch:
-    """Get the Advanced PYQ service initialized in main.py"""
-    global advanced_pyq_service
-    
-    # Try to get the service initialized in main.py
-    try:
-        import app.api.api_v1.endpoints.advanced_search as advanced_search_module
-        if hasattr(advanced_search_module, 'advanced_search_service') and advanced_search_module.advanced_search_service is not None:
-            logger.info("✅ Using Advanced PYQ service initialized in main.py")
-            return advanced_search_module.advanced_search_service
-    except Exception as e:
-        logger.warning(f"⚠️ Could not get advanced service from main.py: {e}")
-    
-    # Fallback: create basic advanced service without enhanced features
-    if advanced_pyq_service is None:
-        try:
-            logger.info("🚀 Creating basic Advanced PYQ Search Service...")
-            advanced_pyq_service = create_advanced_pyq_search()
-            logger.info("✅ Basic Advanced PYQ service created (enhanced features may not be available)")
-        except Exception as e:
-            logger.error(f"❌ Failed to create Advanced PYQ service: {e}")
-            logger.info("Falling back to basic PYQ service")
-            # Return basic service as fallback
-            raise Exception("Advanced service not available")
-            
-    return advanced_pyq_service
+
 
 @router.post("/initialize", response_model=InitializationResponse)
 async def initialize_pyq_database():
@@ -164,32 +137,18 @@ async def search_pyq_questions(search_request: PYQSearchRequest):
         # Calculate search limit for pagination (get more results to apply threshold and pagination)
         search_limit = min(search_request.limit + search_request.offset + 50, 200)  # Get extra results for filtering
         
-        # Try to use advanced service first, fallback to basic if needed
-        try:
-            advanced_service = get_advanced_pyq_service()
-            logger.info(f"🔍 Using advanced search with strategy: {search_request.strategy}, limit: {search_limit}")
-            
-            # Use advanced search with strategy (get more results for pagination)
-            all_results = advanced_service.search_questions_advanced(
-                query=search_request.query,
-                limit=search_limit,
-                strategy=search_request.strategy,
-                year_filter=search_request.year_filter,
-                subject_filter=search_request.subject_filter,
-                paper_filter=search_request.paper_filter
-            )
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Advanced search failed, falling back to basic: {e}")
-            # Fallback to basic service
-            service = get_pyq_service()
-            all_results = service.search_questions(
-                query=search_request.query,
-                limit=search_limit,
-                year_filter=search_request.year_filter,
-                subject_filter=search_request.subject_filter,
-                paper_filter=search_request.paper_filter
-            )
+        # Use the basic PYQ service (optimized and stable)
+        service = get_pyq_service()
+        logger.info(f"🔍 Using PYQ search service with limit: {search_limit}")
+        
+        all_results = service.search_questions(
+            query=search_request.query,
+            limit=search_limit,
+            offset=search_request.offset,
+            year_filter=search_request.year_filter,
+            subject_filter=search_request.subject_filter,
+            paper_filter=search_request.paper_filter
+        )
         
         # Apply score threshold filtering
         filtered_results = [
