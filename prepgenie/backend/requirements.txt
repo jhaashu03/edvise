@@ -76,3 +76,9 @@ aiosqlite==0.20.0
 httpx==0.28.1
 tenacity==8.2.3
 openai==1.35.0
+
+# LangGraph dependencies for advanced workflow orchestration
+langgraph==0.2.50
+langchain-core==0.3.26
+langchain-openai==0.2.11
+langsmith==0.2.7

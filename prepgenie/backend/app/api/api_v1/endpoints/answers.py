@@ -123,10 +123,37 @@ def comprehensive_pdf_evaluation(answer_id: int, file_path: str):
         # Process the PDF using the same method as our working debug script
         logger.info(f"Starting PDF processing for answer_id={answer_id}")
         
-        # Use the standalone function that worked in our debug script
-        # Import the exact function that worked
+        # Import workflow functions
         from app.utils.vision_pdf_processor import process_vision_pdf_with_evaluation
         import asyncio
+        
+        # LangGraph workflow support (new)
+        try:
+            from app.workflows import langgraph_comprehensive_pdf_evaluation
+            LANGGRAPH_AVAILABLE = True
+            logger.info("✅ LangGraph workflows available")
+        except ImportError as e:
+            LANGGRAPH_AVAILABLE = False
+            logger.warning(f"⚠️ LangGraph not available: {e}")
+
+        # Import workflow configuration
+        from app.core.workflow_config import WorkflowConfig
+        
+        # Determine which workflow to use
+        use_langgraph = LANGGRAPH_AVAILABLE and WorkflowConfig.should_use_langgraph(
+            user_id=answer.user_id,
+            force_mode=None  # Could be set via query param for testing
+        )
+        
+        workflow_name = "LangGraph" if use_langgraph else "Legacy"
+        if use_langgraph:
+            logger.info(f"🎯 ============================================")
+            logger.info(f"🎯 🚀 USING LANGGRAPH WORKFLOW 🚀")
+            logger.info(f"🎯 Answer ID: {answer_id}")
+            logger.info(f"🎯 User ID: {answer.user_id}")
+            logger.info(f"🎯 ============================================")
+        else:
+            logger.info(f"🔄 Using {workflow_name} workflow for answer {answer_id}")
         
         try:
             # Background tasks don't have an event loop, so we need to create one
@@ -135,9 +162,29 @@ def comprehensive_pdf_evaluation(answer_id: int, file_path: str):
             asyncio.set_event_loop(loop)
             
             try:
-                evaluation_results = loop.run_until_complete(
-                    process_vision_pdf_with_evaluation(answer.file_path, local_db, answer_id, progress_callback)
-                )
+                # Execute chosen workflow
+                if use_langgraph:
+                    # LangGraph workflow
+                    evaluation_results = loop.run_until_complete(
+                        langgraph_comprehensive_pdf_evaluation(
+                            answer_id=answer_id,
+                            file_path=answer.file_path,
+                            content=answer.content,
+                            db_session=local_db,
+                            progress_callback=progress_callback
+                        )
+                    )
+                    logger.info(f"🎯 ============================================")
+                    logger.info(f"🎯 ✅ LANGGRAPH EVALUATION COMPLETED ✅")
+                    logger.info(f"🎯 Answer ID: {answer_id}")
+                    logger.info(f"🎯 ============================================")
+                else:
+                    # Legacy workflow
+                    evaluation_results = loop.run_until_complete(
+                        process_vision_pdf_with_evaluation(answer.file_path, local_db, answer_id, progress_callback)
+                    )
+                    logger.info(f"✅ Legacy evaluation completed for answer {answer_id}")
+                
                 logger.info(f"PDF processing completed successfully - type: {type(evaluation_results)}")
                 
             finally:
@@ -158,6 +205,36 @@ def comprehensive_pdf_evaluation(answer_id: int, file_path: str):
             logger.info(f"Found {len(evaluation_results['question_evaluations'])} question evaluations - extracting comprehensive analysis")
             
             question_evaluations = evaluation_results["question_evaluations"]
+            
+            # CRITICAL DEBUG: Log the structure of question evaluations
+            logger.info(f"🔍 DEBUG: EARLY PATH - Processing {len(question_evaluations)} evaluations")
+            if question_evaluations:
+                first_eval = question_evaluations[0]
+                logger.info(f"📊 DEBUG: EARLY PATH - First evaluation type: {type(first_eval)}")
+                logger.info(f"📊 DEBUG: EARLY PATH - First evaluation keys: {list(first_eval.keys()) if isinstance(first_eval, dict) else 'NOT_DICT'}")
+                if isinstance(first_eval, dict):
+                    # Check detailed_feedback structure
+                    if 'detailed_feedback' in first_eval:
+                        detailed_feedback = first_eval['detailed_feedback']
+                        logger.info(f"📝 DEBUG: EARLY PATH - detailed_feedback type: {type(detailed_feedback)}")
+                        if isinstance(detailed_feedback, dict):
+                            logger.info(f"📝 DEBUG: EARLY PATH - detailed_feedback keys: {list(detailed_feedback.keys())}")
+                            # Check for dimensional_scores specifically
+                            if 'dimensional_scores' in detailed_feedback:
+                                logger.info(f"✅ DEBUG: EARLY PATH - dimensional_scores found!")
+                            else:
+                                logger.info(f"❌ DEBUG: EARLY PATH - No dimensional_scores in detailed_feedback")
+                        else:
+                            logger.info(f"📝 DEBUG: EARLY PATH - detailed_feedback is not dict: {str(detailed_feedback)[:200]}")
+                    else:
+                        logger.info(f"❌ DEBUG: EARLY PATH - No detailed_feedback in evaluation")
+                    
+                    # Also check answer_evaluation if it exists
+                    if 'answer_evaluation' in first_eval:
+                        answer_eval = first_eval['answer_evaluation']
+                        logger.info(f"📊 DEBUG: EARLY PATH - answer_evaluation type: {type(answer_eval)}")
+                        if isinstance(answer_eval, dict):
+                            logger.info(f"📊 DEBUG: EARLY PATH - answer_evaluation keys: {list(answer_eval.keys())}")
             
             # Initialize score tracking
             score_value = 0.0  # We'll calculate this from individual questions
@@ -180,13 +257,18 @@ def comprehensive_pdf_evaluation(answer_id: int, file_path: str):
             for idx, q_eval in enumerate(question_evaluations[:10]):  # Limit to first 10 for brevity
                 q_num = q_eval.get("question_number", idx + 1)
                 q_text = q_eval.get("question_text", "")[:100] + "..."
-                answer_eval = q_eval.get("answer_evaluation")  # This is the comprehensive analysis result
+                
+                # FIXED: Use detailed_feedback which contains the analysis structure
+                detailed_feedback = q_eval.get("detailed_feedback")  # This contains the analysis with dimensional_scores
+                current_q_score = q_eval.get("current_score", 0.0)  # Direct score from EvaluationResult
+                
+                logger.info(f"🔍 Q{q_num} PROCESSING: current_score={current_q_score}, detailed_feedback type={type(detailed_feedback)}")
                 
                 comprehensive_feedback_parts.append(f"**Q{q_num}**: {q_text}")
                 
-                # Extract score from comprehensive analysis with null safety
-                current_q_score = 0.0
-                max_q_score = q_eval.get('marks', 10)
+                # FIXED: Use the correct score from EvaluationResult and fix max_score
+                max_q_score = q_eval.get('max_score', 10)  # Use max_score from EvaluationResult
+                
                 # Ensure max_q_score is never None
                 if max_q_score is None:
                     max_q_score = 10.0
@@ -196,81 +278,100 @@ def comprehensive_pdf_evaluation(answer_id: int, file_path: str):
                     except (ValueError, TypeError):
                         max_q_score = 10.0
                 
-                if answer_eval and isinstance(answer_eval, dict):
-                    # Check if it's the new comprehensive analysis format
-                    if answer_eval.get("success"):
-                        # The analysis data is directly in the result based on test
-                        analysis_data = answer_eval.get("analysis", answer_eval)
+                # Add current score to running totals
+                score_value += current_q_score
+                max_score_value += max_q_score
+                
+                logger.info(f"📋 Q{q_num} SCORE: {current_q_score:.1f}/{max_q_score}")
+                comprehensive_feedback_parts.append(f"Score: {current_q_score:.1f}/{max_q_score}")
+                
+                # FIXED: Extract dimensional scores from detailed_feedback
+                if detailed_feedback and isinstance(detailed_feedback, dict):
+                    # The detailed_feedback contains the analysis structure with dimensional_scores
+                    if "dimensional_scores" in detailed_feedback:
+                        dim_scores = detailed_feedback["dimensional_scores"]
+                        logger.info(f"🔎 DEBUG: EARLY PATH - Found dimensional_scores for Q{q_num}: {len(dim_scores) if dim_scores else 0} dimensions")
+                        logger.info(f"🔎 DEBUG: EARLY PATH - Dimensional scores structure: {list(dim_scores.keys()) if isinstance(dim_scores, dict) else type(dim_scores)}")
                         
-                        # Extract current score from answer_evaluation
-                        if "answer_evaluation" in analysis_data:
-                            answer_eval_data = analysis_data["answer_evaluation"]
-                            current_score_str = answer_eval_data.get("current_score", "0/15")
-                            if "/" in str(current_score_str):
-                                current_q_score = float(str(current_score_str).split("/")[0])
+                        # Add detailed dimensional analysis to feedback
+                        comprehensive_feedback_parts.append("📊 **13-Dimensional Analysis:**")
                         
-                        comprehensive_feedback_parts.append(f"Score: {current_q_score:.1f}/{max_q_score}")
+                        # Process all available dimensional scores
+                        dimension_totals = {
+                            'content': 0, 'structure': 0, 'presentation': 0, 
+                            'analytical': 0, 'factual': 0
+                        }
+                        dimension_counts = {
+                            'content': 0, 'structure': 0, 'presentation': 0,
+                            'analytical': 0, 'factual': 0
+                        }
                         
-                        # Extract and display dimensional scores
-                        if "dimensional_scores" in analysis_data:
-                            dim_scores = analysis_data["dimensional_scores"]
-                            
-                            # Add detailed dimensional analysis to feedback
-                            comprehensive_feedback_parts.append("📊 **13-Dimensional Analysis:**")
-                            
-                            # Process all available dimensional scores
-                            dimension_totals = {
-                                'content': 0, 'structure': 0, 'presentation': 0, 
-                                'analytical': 0, 'factual': 0
-                            }
-                            dimension_counts = {
-                                'content': 0, 'structure': 0, 'presentation': 0,
-                                'analytical': 0, 'factual': 0
-                            }
-                            
-                            # Process each dimensional score
-                            for dim_name, dim_data in dim_scores.items():
-                                if isinstance(dim_data, dict) and 'score' in dim_data:
-                                    score_str = dim_data.get('score', '0/10')
-                                    feedback_text = dim_data.get('feedback', 'No feedback')
-                                    
-                                    # Extract numeric score
-                                    dim_score = 0
-                                    if "/" in str(score_str):
-                                        dim_score = float(str(score_str).split("/")[0])
-                                        max_dim_score = float(str(score_str).split("/")[1])
-                                    
-                                    # Add to feedback with proper formatting - format scores to 1 decimal
-                                    dim_display = dim_name.replace('_', ' ').title()
-                                    formatted_score = f"{dim_score:.1f}/{max_dim_score:.0f}" if "/" in str(score_str) else str(score_str)
-                                    comprehensive_feedback_parts.append(f"  • **{dim_display}**: {formatted_score} - {feedback_text}")
-                                    
-                                    # Categorize for averaging (map to structure/coverage/tone)
-                                    if dim_name in ['content_knowledge', 'factual_accuracy', 'current_affairs']:
-                                        dimension_totals['content'] += dim_score
-                                        dimension_counts['content'] += 1
-                                    elif dim_name in ['structure_organization', 'logical_flow', 'answer_completeness']:
-                                        dimension_totals['structure'] += dim_score
-                                        dimension_counts['structure'] += 1
-                                    elif dim_name in ['language_expression', 'presentation_quality', 'conclusion_effectiveness']:
-                                        dimension_totals['presentation'] += dim_score
-                                        dimension_counts['presentation'] += 1
-                                    elif dim_name in ['analytical_thinking', 'critical_evaluation', 'contemporary_relevance']:
-                                        dimension_totals['analytical'] += dim_score
-                                        dimension_counts['analytical'] += 1
-                                    else:
-                                        # Default fallback
-                                        dimension_totals['factual'] += dim_score
-                                        dimension_counts['factual'] += 1
-                            
-                            # Calculate averages for structure, coverage, tone
-                            total_structure_score += (dimension_totals['structure'] / max(dimension_counts['structure'], 1))
-                            total_coverage_score += (dimension_totals['content'] / max(dimension_counts['content'], 1))  
-                            total_tone_score += (dimension_totals['presentation'] / max(dimension_counts['presentation'], 1))
+                        # Process each dimensional score
+                        for dim_name, dim_data in dim_scores.items():
+                            if isinstance(dim_data, dict) and 'score' in dim_data:
+                                score_str = dim_data.get('score', '0/10')
+                                feedback_text = dim_data.get('feedback', 'No feedback')
+                                
+                                # Extract numeric score with defensive programming
+                                dim_score = 0
+                                max_dim_score = 10  # Default max score
+                                
+                                if "/" in str(score_str):
+                                    try:
+                                        score_parts = str(score_str).split("/")
+                                        # Handle non-numeric values like "N/A", "N/10"
+                                        score_part = score_parts[0].strip()
+                                        max_part = score_parts[1].strip()
+                                        
+                                        # Try to convert score part
+                                        if score_part.lower() in ['n', 'na', 'n/a', 'null', 'none', '']:
+                                            dim_score = 0.0
+                                        else:
+                                            dim_score = float(score_part)
+                                        
+                                        # Try to convert max part
+                                        if max_part.lower() in ['n', 'na', 'n/a', 'null', 'none', '']:
+                                            max_dim_score = 10.0
+                                        else:
+                                            max_dim_score = float(max_part)
+                                            
+                                    except (ValueError, IndexError) as e:
+                                        logger.warning(f"🔧 Could not parse dimensional score '{score_str}' for {dim_name}: {e}")
+                                        dim_score = 0.0
+                                        max_dim_score = 10.0
+                                
+                                # Add to feedback with proper formatting - format scores to 1 decimal
+                                dim_display = dim_name.replace('_', ' ').title()
+                                formatted_score = f"{dim_score:.1f}/{max_dim_score:.0f}" if "/" in str(score_str) else str(score_str)
+                                comprehensive_feedback_parts.append(f"  • **{dim_display}**: {formatted_score} - {feedback_text}")
+                                
+                                # Categorize for averaging (map to structure/coverage/tone)
+                                if dim_name in ['content_knowledge', 'factual_accuracy', 'current_affairs']:
+                                    dimension_totals['content'] += dim_score
+                                    dimension_counts['content'] += 1
+                                elif dim_name in ['structure_organization', 'logical_flow', 'answer_completeness']:
+                                    dimension_totals['structure'] += dim_score
+                                    dimension_counts['structure'] += 1
+                                elif dim_name in ['language_expression', 'presentation_quality', 'conclusion_effectiveness']:
+                                    dimension_totals['presentation'] += dim_score
+                                    dimension_counts['presentation'] += 1
+                                elif dim_name in ['analytical_thinking', 'critical_evaluation', 'contemporary_relevance']:
+                                    dimension_totals['analytical'] += dim_score
+                                    dimension_counts['analytical'] += 1
+                                else:
+                                    # Default fallback
+                                    dimension_totals['factual'] += dim_score
+                                    dimension_counts['factual'] += 1
+                        
+                        # Calculate averages for structure, coverage, tone
+                        total_structure_score += (dimension_totals['structure'] / max(dimension_counts['structure'], 1))
+                        total_coverage_score += (dimension_totals['content'] / max(dimension_counts['content'], 1))  
+                        total_tone_score += (dimension_totals['presentation'] / max(dimension_counts['presentation'], 1))
                         
                         # Extract strengths and improvements from detailed_feedback
-                        if "detailed_feedback" in analysis_data:
-                            feedback_data = analysis_data["detailed_feedback"]
+                        # detailed_feedback itself contains the analysis structure
+                        if "detailed_feedback" in detailed_feedback:
+                            feedback_data = detailed_feedback["detailed_feedback"]
                             
                             # Add strengths
                             if "strengths" in feedback_data:
@@ -282,24 +383,7 @@ def comprehensive_pdf_evaluation(answer_id: int, file_path: str):
                                 for improvement in feedback_data["improvement_suggestions"][:2]:  # First 2 improvements per question
                                     improvements_list.append(f"Q{q_num}: {improvement}")
                 
-                # Add individual question score to total with null safety
-                if current_q_score is not None:
-                    try:
-                        current_q_score = float(current_q_score)
-                        score_value += current_q_score
-                    except (ValueError, TypeError):
-                        score_value += 0.0
-                else:
-                    score_value += 0.0
-                    
-                if max_q_score is not None:
-                    try:
-                        max_q_score = float(max_q_score)
-                        max_score_value += max_q_score
-                    except (ValueError, TypeError):
-                        max_score_value += 10.0
-                else:
-                    max_score_value += 10.0
+                # Score accumulation already handled at lines 279-280
                 
                 comprehensive_feedback_parts.append("")
             
@@ -488,9 +572,56 @@ async def comprehensive_pdf_evaluation_legacy(answer_id: int, file_path: str):
         try:
             # Import and use the complete evaluation function 
             from app.utils.vision_pdf_processor import process_vision_pdf_with_evaluation
+            from app.utils.comprehensive_pdf_evaluator import create_comprehensive_pdf_evaluation_v2
+
+            # LangGraph workflow support (new)
+            try:
+                from app.workflows import langgraph_comprehensive_pdf_evaluation
+                LANGGRAPH_AVAILABLE = True
+                logger.info("✅ LangGraph workflows available")
+            except ImportError as e:
+                LANGGRAPH_AVAILABLE = False
+                logger.warning(f"⚠️ LangGraph not available: {e}")
+
+            # Import workflow configuration
+            from app.core.workflow_config import WorkflowConfig
             
-            logger.info("💡 Calling process_vision_pdf_with_evaluation...")
-            evaluation_results = await process_vision_pdf_with_evaluation(file_path, local_db, answer_id)
+            # Determine which workflow to use
+            use_langgraph = LANGGRAPH_AVAILABLE and WorkflowConfig.should_use_langgraph(
+                user_id=answer.user_id,
+                force_mode=None  # Could be set via query param for testing
+            )
+            
+            workflow_name = "LangGraph" if use_langgraph else "Legacy"
+            if use_langgraph:
+                logger.info(f"🎯 ============================================")
+                logger.info(f"🎯 🚀 USING LANGGRAPH WORKFLOW 🚀")
+                logger.info(f"🎯 Answer ID: {answer_id}")
+                logger.info(f"🎯 User ID: {answer.user_id}")
+                logger.info(f"🎯 ============================================")
+            else:
+                logger.info(f"🔄 Using {workflow_name} workflow for answer {answer_id}")
+            
+            # Execute chosen workflow
+            if use_langgraph:
+                # LangGraph workflow
+                evaluation_results = await langgraph_comprehensive_pdf_evaluation(
+                    answer_id=answer_id,
+                    file_path=file_path,
+                    content=content,
+                    db_session=local_db,
+                    progress_callback=progress_callback
+                )
+                logger.info(f"🎯 ============================================")
+                logger.info(f"🎯 ✅ LANGGRAPH EVALUATION COMPLETED ✅")
+                logger.info(f"🎯 Answer ID: {answer_id}")
+                logger.info(f"🎯 ============================================")
+            else:
+                # Legacy workflow
+                evaluation_results = await process_vision_pdf_with_evaluation(
+                    file_path, local_db, answer_id, progress_callback
+                )
+                logger.info(f"✅ Legacy evaluation completed for answer {answer_id}")
             
             logger.info(f"💡 process_vision_pdf_with_evaluation returned successfully!")
             logger.info(f"💡 evaluation_results is None: {evaluation_results is None}")
@@ -678,6 +809,28 @@ async def comprehensive_pdf_evaluation_legacy(answer_id: int, file_path: str):
             if question_evaluations and len(question_evaluations) > 0:
                 logger.info(f"DEBUG: ✅ Found {len(question_evaluations)} question evaluations - proceeding with database save...")
                 
+                # Debug: Log the first evaluation structure
+                if len(question_evaluations) > 0:
+                    first_eval = question_evaluations[0]
+                    logger.info(f"📊 DEBUG: First evaluation structure type: {type(first_eval)}")
+                    if isinstance(first_eval, dict):
+                        logger.info(f"📊 DEBUG: First evaluation keys: {list(first_eval.keys())}")
+                        if 'detailed_feedback' in first_eval:
+                            feedback = first_eval['detailed_feedback']
+                            logger.info(f"📊 DEBUG: detailed_feedback type: {type(feedback)}")
+                            if isinstance(feedback, dict):
+                                logger.info(f"📊 DEBUG: detailed_feedback keys: {list(feedback.keys())}")
+                                if 'dimensional_scores' in feedback:
+                                    logger.info(f"📊 DEBUG: dimensional_scores found: {feedback['dimensional_scores']}")
+                                else:
+                                    logger.info(f"📊 DEBUG: No dimensional_scores in detailed_feedback")
+                            else:
+                                logger.info(f"📊 DEBUG: detailed_feedback is not dict: {str(feedback)[:200]}")
+                        else:
+                            logger.info(f"📊 DEBUG: No detailed_feedback in evaluation")
+                    else:
+                        logger.info(f"📊 DEBUG: First evaluation is not dict: {str(first_eval)[:200]}")
+                
                 # Extract summary data from evaluation results or create defaults
                 total_questions = evaluation_results.get("total_questions_evaluated", len(question_evaluations))
                 total_score = evaluation_results.get("total_score", "0/0")
@@ -747,6 +900,59 @@ async def comprehensive_pdf_evaluation_legacy(answer_id: int, file_path: str):
                 
                 comprehensive_feedback = "\n".join(feedback_parts)
                 
+                # Extract dimensional scores from LangGraph evaluations
+                total_structure_score = 0.0
+                total_coverage_score = 0.0
+                total_tone_score = 0.0
+                valid_evaluations = 0
+                
+                logger.info(f"🔍 DEBUG: Starting dimensional score extraction from {len(question_evaluations)} evaluations")
+                logger.info(f"📊 DEBUG: First few evaluations sample: {question_evaluations[:2] if question_evaluations else 'EMPTY LIST'}")
+                
+                for i, q_eval in enumerate(question_evaluations):
+                    logger.info(f"📋 DEBUG: Evaluation {i+1} type: {type(q_eval)}, keys: {list(q_eval.keys()) if isinstance(q_eval, dict) else 'NOT_DICT'}")
+                    
+                    if isinstance(q_eval, dict) and q_eval.get('detailed_feedback'):
+                        detailed_feedback = q_eval['detailed_feedback']
+                        logger.info(f"📝 DEBUG: detailed_feedback type: {type(detailed_feedback)}, keys: {list(detailed_feedback.keys()) if isinstance(detailed_feedback, dict) else 'NOT_DICT'}")
+                        
+                        # Extract dimensional scores if available
+                        if isinstance(detailed_feedback, dict):
+                            dimensions = detailed_feedback.get('dimensional_scores', {})
+                            if dimensions:
+                                structure_score = dimensions.get('Structure', {}).get('score', 0)
+                                coverage_score = dimensions.get('Coverage', {}).get('score', 0)
+                                tone_score = dimensions.get('Tone_and_Language', {}).get('score', 0)
+                                
+                                # Convert string scores like "7/10" to float
+                                def parse_score(score_str):
+                                    try:
+                                        if isinstance(score_str, (int, float)):
+                                            return float(score_str)
+                                        elif isinstance(score_str, str) and '/' in score_str:
+                                            return float(score_str.split('/')[0])
+                                        return 0.0
+                                    except:
+                                        return 0.0
+                                
+                                total_structure_score += parse_score(structure_score)
+                                total_coverage_score += parse_score(coverage_score)
+                                total_tone_score += parse_score(tone_score)
+                                valid_evaluations += 1
+                
+                # Calculate average dimensional scores, fallback to calculated scores
+                if valid_evaluations > 0:
+                    avg_structure = total_structure_score / valid_evaluations
+                    avg_coverage = total_coverage_score / valid_evaluations
+                    avg_tone = total_tone_score / valid_evaluations
+                else:
+                    # Fallback to percentage-based scores
+                    avg_structure = min(8.0, score_percentage / 10)
+                    avg_coverage = min(8.0, score_percentage / 10)
+                    avg_tone = min(8.0, score_percentage / 10)
+                
+                logger.info(f"📊 Dimensional scores extracted: Structure={avg_structure:.1f}, Coverage={avg_coverage:.1f}, Tone={avg_tone:.1f}")
+                
                 # Create evaluation record
                 evaluation_data = AnswerEvaluationCreate(
                     score=actual_score,
@@ -764,9 +970,9 @@ async def comprehensive_pdf_evaluation_legacy(answer_id: int, file_path: str):
                         "Enhance presentation and clarity",
                         "Practice similar question patterns"
                     ]),
-                    structure=min(8.0, score_percentage / 10),  # Scale to /10
-                    coverage=min(8.0, score_percentage / 10),   # Scale to /10
-                    tone=min(8.0, score_percentage / 10)        # Scale to /10
+                    structure=avg_structure,
+                    coverage=avg_coverage,
+                    tone=avg_tone
                 )
                 
                 # Save to database using CRUD with local database session

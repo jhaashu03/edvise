@@ -723,6 +723,147 @@ You are analyzing a **HANDWRITTEN UPSC Civil Services Mains exam answer booklet*
         
         return matched_qa
     
+    async def extract_questions_only(self, file_path: str, progress_callback: Optional[Callable] = None) -> Dict:
+        """
+        Vision-only PDF processing - extracts questions without comprehensive analysis
+        Used by LangGraph workflow to prevent duplicate evaluation
+        
+        Returns structured data with questions only, no evaluations
+        """
+        self.processing_start_time = datetime.now()
+        
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"PDF not found: {file_path}")
+        
+        # Open PDF and get basic info
+        doc = fitz.open(file_path)
+        self.total_pages = len(doc)
+        pdf_filename = os.path.basename(file_path)
+        file_size_bytes = os.path.getsize(file_path)
+        file_size_mb = file_size_bytes / (1024 * 1024)
+        
+        # Initialize progress tracker
+        progress_tracker = ProgressTracker(self.total_pages, progress_callback)
+        estimated_minutes = progress_tracker.estimate_total_time()
+        
+        # Log initial setup
+        logger.info(f"📄 VISION-ONLY: Starting processing: {pdf_filename} ({self.total_pages} pages, {file_size_mb:.1f} MB)")
+        await progress_tracker.update_progress("initializing", details=f"{pdf_filename} - Vision extraction only")
+        
+        # Phase 1: Process each page with vision analysis (NO COMPREHENSIVE EVALUATION)
+        page_analyses = []
+        questions_found = 0
+        answers_found = 0
+        
+        for page_num in range(self.total_pages):
+            try:
+                current_page = page_num + 1
+                page = doc[page_num]
+                
+                await progress_tracker.update_progress("page_processing", current_page=current_page, 
+                                                details=f"Converting page {current_page} to image")
+                
+                # Convert page to image
+                page_image = self.convert_page_to_image(page)
+                
+                if page_image:
+                    await progress_tracker.update_progress("page_processing", current_page=current_page,
+                                                   details=f"Analyzing page {current_page} with Vision AI")
+                    
+                    # Analyze with vision LLM (only for question/answer detection)
+                    analysis = await self.analyze_page_with_vision(page_image, current_page)
+                    page_analyses.append(analysis)
+                    
+                    # Count content found
+                    page_questions = len(analysis.get("questions_found", []))
+                    page_answers = len(analysis.get("answers_found", []))
+                    questions_found += page_questions
+                    answers_found += page_answers
+                    
+                    # Update progress with findings
+                    if page_questions > 0 or page_answers > 0:
+                        details = f"Found {page_questions} questions, {page_answers} answers"
+                    else:
+                        details = "No content detected on this page"
+                    
+                    await progress_tracker.update_progress("page_processing", current_page=current_page, details=details)
+                    
+                    # Add delay between pages to prevent rate limiting
+                    if current_page < self.total_pages:  # Don't delay after last page
+                        await asyncio.sleep(2.0)  # 2 second delay between pages
+                    
+                else:
+                    await progress_tracker.update_progress("page_processing", current_page=current_page,
+                                                   details=f"Failed to process page {current_page}")
+                    
+            except Exception as e:
+                logger.error(f"Error processing page {current_page}: {e}")
+                await progress_tracker.update_progress("page_processing", current_page=current_page,
+                                               details=f"Error on page {current_page}: {str(e)[:50]}")
+        
+        doc.close()
+        
+        # Phase 2: Extract and consolidate questions (NO EVALUATION)
+        await progress_tracker.update_progress("question_extraction", current_page=0,
+                                       details="Consolidating questions from all pages")
+        
+        # Phase 3: Match questions to answers with progress tracking
+        await progress_tracker.update_progress("question_extraction", current_page=self.total_pages,
+                                       details="Matching questions to answers")
+        
+        matched_qa = self.match_questions_to_answers(page_analyses)
+        total_questions = len(matched_qa)
+        total_marks = sum(qa.get("marks", 0) or 0 for qa in matched_qa)
+        
+        await progress_tracker.update_progress("question_extraction", current_page=self.total_pages,
+                                       details=f"Found {total_questions} questions with {total_marks} total marks")
+        
+        # Phase 4: SKIP COMPREHENSIVE EVALUATION (this prevents duplicate execution)
+        logger.info(f"🔧 VISION-ONLY MODE: Skipping comprehensive evaluation - will be handled by LangGraph analysis node")
+        
+        # Calculate processing time
+        processing_time = (datetime.now() - self.processing_start_time).total_seconds()
+        
+        # Return structured data without evaluations
+        final_result = {
+            "success": True,
+            "pdf_filename": pdf_filename,
+            "total_pages": self.total_pages,
+            "file_size_mb": round(file_size_mb, 2),
+            "processing_time_seconds": round(processing_time, 2),
+            
+            # Questions data (no evaluations)
+            "questions": matched_qa,
+            "total_questions_found": total_questions,
+            "total_marks": total_marks,
+            
+            # Processing metadata
+            "extraction_method": "Vision-only extraction (no analysis)",
+            "processing_timestamp": datetime.now().isoformat(),
+            "extraction_summary": {
+                "pages_processed": self.total_pages,
+                "questions_found": questions_found,
+                "answers_found": answers_found,
+                "matched_qa_pairs": total_questions,
+                "total_marks_available": total_marks
+            },
+            
+            # Technical metadata
+            "technical_metadata": {
+                "processing_mode": "vision_only",
+                "comprehensive_analysis_skipped": True,
+                "analysis_will_be_handled_by": "LangGraph analyze_dimensions_node",
+                "duplicate_prevention": True
+            }
+        }
+        
+        await progress_tracker.update_progress("finalizing", 
+                                       details=f"✅ Vision extraction complete! {total_questions} questions found in {round(processing_time/60, 1)} minutes")
+        
+        logger.info(f"✅ VISION-ONLY extraction completed: {total_questions} questions, {total_marks} marks, {processing_time:.2f}s")
+        
+        return final_result
+    
     async def process_pdf_with_vision(self, file_path: str, progress_callback: Optional[Callable] = None) -> Dict:
         """
         Complete PDF processing pipeline using vision extraction with comprehensive progress tracking
