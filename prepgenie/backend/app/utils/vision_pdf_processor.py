@@ -425,9 +425,10 @@ You are analyzing a **HANDWRITTEN UPSC Civil Services Mains exam answer booklet*
                 }
             ]
             
-            # Use vision chat for analysis
+            # Use vision chat for analysis with correct model
             response = await self.llm_service.vision_chat(
                 messages=messages,
+                model="gpt-4.1-mini",  # Use the same model as regular chat for Walmart Gateway
                 temperature=0.1,
                 max_tokens=6000  # Increased from 2000 to 6000 for comprehensive vision analysis
             )

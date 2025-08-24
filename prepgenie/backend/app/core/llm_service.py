@@ -229,9 +229,17 @@ class OpenAIProvider:
                 
             except httpx.HTTPStatusError as e:
                 logger.error(f"OpenAI Vision HTTP error: {e.response.status_code} - {e.response.text}")
-                raise LLMServiceError(f"OpenAI Vision API error: {e.response.status_code}")
+                logger.error(f"Vision request URL: {url}")
+                logger.error(f"Vision request headers: {headers}")
+                logger.error(f"Vision request payload model: {payload.get('model')}")
+                raise LLMServiceError(f"OpenAI Vision API error: {e.response.status_code} - {e.response.text}")
             except Exception as e:
                 logger.error(f"OpenAI Vision request error: {e}")
+                logger.error(f"Vision request URL: {url}")
+                logger.error(f"Vision request headers: {headers}")
+                logger.error(f"Vision request payload model: {payload.get('model')}")
+                import traceback
+                logger.error(f"Full traceback: {traceback.format_exc()}")
                 raise LLMServiceError(f"OpenAI Vision error: {str(e)}")
 
 
