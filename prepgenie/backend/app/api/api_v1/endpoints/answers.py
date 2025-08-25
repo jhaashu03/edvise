@@ -1219,14 +1219,27 @@ def get_my_answers(
     result = []
     for answer in answers:
         logger.debug(f"Processing answer {answer.id}, has evaluation: {answer.evaluation is not None}")
+        logger.debug(f"Answer {answer.id} - question_id: {answer.question_id}, content: {answer.content is not None}")
+        
+        # Handle None values for required fields (for legacy compatibility)
+        question_id = answer.question_id if answer.question_id is not None else "pdf_upload"
+        content = answer.content if answer.content is not None else "PDF file uploaded"
+        
+        # Create safe filename
+        file_name = None
+        if answer.file_path:
+            try:
+                file_name = answer.file_path.split('/')[-1]
+            except (AttributeError, IndexError):
+                file_name = "uploaded_file"
         
         # Create base answer response using AnswerResponse schema with aliases
         answer_response = AnswerResponse(
             id=answer.id,
-            question_id=answer.question_id,
-            content=answer.content,
+            question_id=question_id,
+            content=content,
             file_path=answer.file_path,
-            file_name=answer.file_path.split('/')[-1] if answer.file_path else None,
+            file_name=file_name,
             uploaded_at=answer.uploaded_at.isoformat(),
             evaluation=None
         )
