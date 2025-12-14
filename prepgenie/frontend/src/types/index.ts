@@ -226,3 +226,21 @@ export interface ApiResponse<T> {
   message: string;
   success: boolean;
 }
+
+// Model Answer Generation types
+export interface QuestionModelAnswer {
+  question_number: number;
+  question_text: string;
+  original_answer_preview: string;
+  model_answer: string;
+  improvements_applied: string[];
+  key_additions: string[];
+}
+
+export interface ModelAnswerResponse {
+  success: boolean;
+  answer_id: number;
+  questions: QuestionModelAnswer[];
+  generated_at: string;
+  cached?: boolean;
+}

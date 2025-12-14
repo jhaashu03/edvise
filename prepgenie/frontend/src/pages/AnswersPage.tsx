@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { apiService } from '../services/api';
-import { UploadedAnswer, AnswerEvaluation, QuestionEvaluation } from '../types';
+import { UploadedAnswer, AnswerEvaluation, QuestionEvaluation, ModelAnswerResponse } from '../types';
 import {
   DocumentArrowUpIcon,
   DocumentTextIcon,
@@ -12,10 +12,12 @@ import {
   XMarkIcon,
   SparklesIcon,
   AcademicCapIcon,
+  DocumentArrowDownIcon,
 } from '@heroicons/react/24/outline';
 import { ProgressModal } from '../components/ProgressModal';
 import { useProgressTracker } from '../hooks/useProgressTracker';
 import { ActionableEvaluationCard } from '../components/ActionableEvaluationCard';
+import { ModelAnswerComparison } from '../components/ModelAnswerComparison';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -31,6 +33,11 @@ const AnswersPage: React.FC = () => {
   const [uploadLoading, setUploadLoading] = useState(false);
   const [expandedEvaluations, setExpandedEvaluations] = useState<Set<string>>(new Set());
   const [selectedQuestions, setSelectedQuestions] = useState<Record<string, number>>({});  // Track selected question per answer
+  
+  // Model Answer state
+  const [modelAnswerData, setModelAnswerData] = useState<ModelAnswerResponse | null>(null);
+  const [modelAnswerLoading, setModelAnswerLoading] = useState<string | null>(null); // answerId being loaded
+  const [showModelAnswer, setShowModelAnswer] = useState(false);
   
   // Progress tracking for modal
   const { isVisible, taskId, showProgress, hideProgress, handleComplete, handleError } = useProgressTracker({
@@ -133,6 +140,74 @@ const AnswersPage: React.FC = () => {
       loadAnswers();
     } catch (error) {
       console.error(`Failed to start ${evaluationType} evaluation:`, error);
+    }
+  };
+
+  const handleGenerateModelAnswer = async (answerId: string) => {
+    try {
+      setModelAnswerLoading(answerId);
+      const response = await apiService.generateModelAnswer(answerId);
+      setModelAnswerData(response);
+      setShowModelAnswer(true);
+    } catch (error) {
+      console.error('Failed to generate model answer:', error);
+      alert('Failed to generate model answer. Please try again.');
+    } finally {
+      setModelAnswerLoading(null);
+    }
+  };
+
+  const handleDownloadModelAnswerPDF = () => {
+    if (!modelAnswerData) return;
+    
+    // Create a printable HTML content
+    const printContent = modelAnswerData.questions.map((q, idx) => `
+      <div style="page-break-after: always; padding: 20px; font-family: Georgia, serif;">
+        <h1 style="color: #059669; border-bottom: 2px solid #059669; padding-bottom: 10px;">
+          Question ${q.question_number}: Model Answer
+        </h1>
+        <p style="color: #666; font-style: italic; margin-bottom: 20px;">
+          ${q.question_text}
+        </p>
+        <div style="background: #f0fdf4; padding: 20px; border-radius: 8px; line-height: 1.8;">
+          ${q.model_answer.replace(/\n/g, '<br/>').replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')}
+        </div>
+        ${q.improvements_applied.length > 0 ? `
+          <div style="margin-top: 20px; background: #eff6ff; padding: 15px; border-radius: 8px;">
+            <h3 style="color: #1d4ed8; margin-bottom: 10px;">Improvements Applied:</h3>
+            <ul>
+              ${q.improvements_applied.map(imp => `<li>${imp}</li>`).join('')}
+            </ul>
+          </div>
+        ` : ''}
+      </div>
+    `).join('');
+
+    const printWindow = window.open('', '_blank');
+    if (printWindow) {
+      printWindow.document.write(`
+        <html>
+          <head>
+            <title>Model Answer - PrepGenie</title>
+            <style>
+              body { margin: 0; padding: 20px; }
+              @media print { 
+                body { padding: 0; }
+                @page { margin: 1cm; }
+              }
+            </style>
+          </head>
+          <body>
+            <div style="text-align: center; margin-bottom: 30px;">
+              <h1 style="color: #059669;">PrepGenie - AI Model Answers</h1>
+              <p style="color: #666;">Generated on ${new Date(modelAnswerData.generated_at).toLocaleDateString()}</p>
+            </div>
+            ${printContent}
+          </body>
+        </html>
+      `);
+      printWindow.document.close();
+      printWindow.print();
     }
   };
 
@@ -419,7 +494,7 @@ const AnswersPage: React.FC = () => {
                               <div className="flex items-center justify-between">
                                 <div>
                                   <div className="text-3xl font-bold text-indigo-600">
-                                    {Number(answer.evaluation.overall_score || answer.evaluation.score).toFixed(1)}/{answer.evaluation.maxScore}
+                                    {Number(answer.evaluation.score).toFixed(1)}/{answer.evaluation.maxScore}
                                   </div>
                                   <div className="text-sm text-gray-600 mt-1">
                                     {answer.evaluation.quick_verdict || 'Click to view detailed analysis'}
@@ -533,6 +608,34 @@ const AnswersPage: React.FC = () => {
                                   evaluation={answer.evaluation}
                                 />
                               )}
+                              
+                              {/* Generate Model Answer Button */}
+                              <div className="mt-6 pt-6 border-t border-gray-200">
+                                <button
+                                  onClick={() => handleGenerateModelAnswer(answer.id)}
+                                  disabled={modelAnswerLoading === answer.id}
+                                  className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-xl font-semibold shadow-lg hover:shadow-xl transition-all disabled:opacity-70 disabled:cursor-not-allowed"
+                                >
+                                  {modelAnswerLoading === answer.id ? (
+                                    <>
+                                      <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                      </svg>
+                                      <span>Generating Model Answer...</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <SparklesIcon className="h-5 w-5" />
+                                      <span>Generate Topper-Quality Model Answer</span>
+                                      <DocumentArrowDownIcon className="h-5 w-5" />
+                                    </>
+                                  )}
+                                </button>
+                                <p className="text-center text-sm text-gray-500 mt-2">
+                                  AI will transform your answer into a high-scoring model answer
+                                </p>
+                              </div>
                             </>
                           )}
                         </>
@@ -807,6 +910,18 @@ const AnswersPage: React.FC = () => {
           onClose={hideProgress}
           onComplete={handleComplete}
           onError={handleError}
+        />
+      )}
+
+      {/* Model Answer Comparison Modal */}
+      {showModelAnswer && modelAnswerData && (
+        <ModelAnswerComparison
+          modelAnswerData={modelAnswerData}
+          onClose={() => {
+            setShowModelAnswer(false);
+            setModelAnswerData(null);
+          }}
+          onDownloadPDF={handleDownloadModelAnswerPDF}
         />
       )}
     </div>

@@ -13,7 +13,8 @@ import {
   ChatMessage,
   ProgressData,
   SyllabusItem,
-  ApiResponse 
+  ApiResponse,
+  ModelAnswerResponse
 } from '../types';
 
 class ApiService {
@@ -174,6 +175,21 @@ class ApiService {
     };
   }> {
     const response = await this.api.get('/answers/evaluation-options');
+    return response.data;
+  }
+
+  // Model Answer Generation
+  async generateModelAnswer(answerId: string, questionIndex: number = 0): Promise<ModelAnswerResponse> {
+    const response: AxiosResponse<ModelAnswerResponse> = await this.api.post(
+      `/answers/${answerId}/generate-model-answer?question_index=${questionIndex}`
+    );
+    return response.data;
+  }
+
+  async getModelAnswer(answerId: string): Promise<ModelAnswerResponse> {
+    const response: AxiosResponse<ModelAnswerResponse> = await this.api.get(
+      `/answers/${answerId}/model-answer`
+    );
     return response.data;
   }
 

@@ -38,6 +38,9 @@ class AnswerEvaluation(Base):
     # Contains: demand_analysis, structure_analysis, examples, diagram_suggestion, 
     # value_additions, presentation, top_3_improvements, dimensional_scores, etc.
     actionable_data = Column(Text, nullable=True)  # JSON string with full evaluation details
+    
+    # Model answer: AI-enhanced version incorporating all feedback suggestions
+    model_answer = Column(Text, nullable=True)  # JSON string with model answers for each question
 
     # Relationship
     answer = relationship("UploadedAnswer", back_populates="evaluation")

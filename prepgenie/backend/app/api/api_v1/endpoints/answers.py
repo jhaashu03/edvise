@@ -283,9 +283,13 @@ async def dimensional_pdf_evaluation(answer_id: int, file_path: str, task_id: st
                     answer_eval = q_eval['answer_evaluation']
                     if isinstance(answer_eval, dict):
                         # Extract actionable fields for frontend display
+                        # Get student's original answer from evaluation data
+                        student_answer = q_eval.get('student_answer', '') or q_eval.get('answer_text', '') or q_eval.get('extracted_answer', '')
+                        
                         question_actionable = {
                             "question_number": q_eval.get('question_number', i + 1),
                             "question_text": q_eval.get('question_text', ''),
+                            "student_answer": student_answer,  # Store original student answer
                             "marks": q_eval.get('marks', 10),
                             "detected_subject": answer_eval.get('detected_subject'),
                             "demand_analysis": answer_eval.get('demand_analysis'),
@@ -1046,16 +1050,16 @@ async def get_my_answers(
         if evaluation:
             evaluation_data = {
                 "id": evaluation.id,
-                "answer_id": evaluation.answer_id,
+                "answerId": evaluation.answer_id,
                 "score": evaluation.score,
-                "max_score": evaluation.max_score,
+                "maxScore": evaluation.max_score,  # camelCase for frontend
                 "feedback": evaluation.feedback,
                 "strengths": evaluation.strengths,
                 "improvements": evaluation.improvements,
                 "structure": evaluation.structure,
                 "coverage": evaluation.coverage,
                 "tone": evaluation.tone,
-                "evaluated_at": evaluation.evaluated_at.isoformat() if evaluation.evaluated_at else None
+                "evaluatedAt": evaluation.evaluated_at.isoformat() if evaluation.evaluated_at else None
             }
             
             # Parse and include actionable data if available
@@ -1293,3 +1297,351 @@ async def get_processing_progress(
     """Get processing progress for a specific task"""
     progress_tracker = ProgressTracker()
     return progress_tracker.get_progress(task_id)
+
+
+@router.post("/{answer_id}/generate-model-answer")
+async def generate_model_answer(
+    answer_id: int,
+    question_index: Optional[int] = 0,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Generate an AI-enhanced model answer based on the evaluation feedback.
+    
+    Takes the student's original answer and the actionable feedback from evaluation,
+    then generates an improved "topper-quality" version incorporating all suggestions.
+    
+    Args:
+        answer_id: ID of the answer
+        question_index: Index of question to generate model answer for (for multi-question PDFs)
+    
+    Returns:
+        Model answer with improvements applied
+    """
+    # Verify answer ownership
+    answer = db.query(Answer).filter(
+        Answer.id == answer_id,
+        Answer.user_id == current_user.id
+    ).first()
+    
+    if not answer:
+        raise HTTPException(status_code=404, detail="Answer not found")
+    
+    # Get evaluation
+    evaluation = db.query(Evaluation).filter(
+        Evaluation.answer_id == answer_id
+    ).first()
+    
+    if not evaluation:
+        raise HTTPException(status_code=400, detail="Answer must be evaluated first before generating model answer")
+    
+    if not evaluation.actionable_data:
+        raise HTTPException(status_code=400, detail="Evaluation doesn't have actionable data. Please re-run evaluation.")
+    
+    # Check if model answer already exists
+    if evaluation.model_answer:
+        try:
+            existing_model = json.loads(evaluation.model_answer)
+            return {
+                "success": True,
+                "answer_id": answer_id,
+                "questions": existing_model.get("questions", []),
+                "generated_at": existing_model.get("generated_at", ""),
+                "cached": True
+            }
+        except json.JSONDecodeError:
+            pass  # Regenerate if parsing fails
+    
+    # Parse actionable data
+    try:
+        actionable = json.loads(evaluation.actionable_data)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Failed to parse evaluation data")
+    
+    questions = actionable.get("questions", [])
+    if not questions:
+        raise HTTPException(status_code=400, detail="No questions found in evaluation data")
+    
+    # Get LLM service
+    llm_service = get_llm_service()
+    
+    # Generate model answers for all questions
+    model_answers = []
+    
+    for q_idx, q_data in enumerate(questions):
+        question_text = q_data.get("question_text", "")
+        # Get student's original answer from stored data
+        original_answer = q_data.get("student_answer", "") or q_data.get("original_answer", "") or q_data.get("extracted_answer", "")
+        
+        # Build improvement context from actionable data
+        improvements_context = _build_improvements_context(q_data)
+        
+        # Generate model answer using LLM
+        model_answer_text = await _generate_single_model_answer(
+            llm_service=llm_service,
+            question=question_text,
+            original_answer=original_answer,
+            improvements=improvements_context,
+            q_data=q_data
+        )
+        
+        model_answers.append({
+            "question_number": q_data.get("question_number", q_idx + 1),
+            "question_text": question_text[:200] + "..." if len(question_text) > 200 else question_text,
+            "original_answer_preview": original_answer[:300] + "..." if len(original_answer) > 300 else original_answer,
+            "model_answer": model_answer_text,
+            "improvements_applied": improvements_context.get("top_improvements", []),
+            "key_additions": improvements_context.get("key_additions", [])
+        })
+    
+    # Store model answer in database
+    model_answer_data = {
+        "questions": model_answers,
+        "generated_at": datetime.now().isoformat()
+    }
+    
+    from app.crud.answer import update_answer_evaluation
+    update_answer_evaluation(db, evaluation.id, model_answer=json.dumps(model_answer_data))
+    
+    logger.info(f"✨ Generated model answers for answer {answer_id} ({len(model_answers)} questions)")
+    
+    return {
+        "success": True,
+        "answer_id": answer_id,
+        "questions": model_answers,
+        "generated_at": model_answer_data["generated_at"],
+        "cached": False
+    }
+
+
+def _build_improvements_context(q_data: dict) -> dict:
+    """Extract improvement suggestions from question evaluation data"""
+    context = {
+        "top_improvements": [],
+        "key_additions": [],
+        "examples_to_add": [],
+        "facts_to_add": [],
+        "diagram_suggestion": None,
+        "structure_suggestion": None,
+        "conclusion_suggestion": None
+    }
+    
+    # Top 3 improvements
+    if q_data.get("top_3_improvements"):
+        context["top_improvements"] = q_data["top_3_improvements"]
+    
+    # Demand analysis - what was missed
+    if q_data.get("demand_analysis"):
+        demands_missed = q_data["demand_analysis"].get("demands_missed", [])
+        context["key_additions"].extend([f"Address: {d}" for d in demands_missed])
+    
+    # Content quality - missing facts and keywords
+    if q_data.get("content_quality"):
+        cq = q_data["content_quality"]
+        context["facts_to_add"] = cq.get("facts_missing", [])
+        context["key_additions"].extend(cq.get("keywords_to_add", []))
+        if cq.get("current_affairs_link"):
+            context["key_additions"].append(f"Link to: {cq['current_affairs_link']}")
+    
+    # Examples
+    if q_data.get("examples"):
+        ex = q_data["examples"]
+        context["examples_to_add"] = ex.get("examples_to_add", [])
+        if ex.get("constitutional_legal_refs"):
+            context["examples_to_add"].append(ex["constitutional_legal_refs"])
+    
+    # Diagram
+    if q_data.get("diagram_suggestion") and q_data["diagram_suggestion"].get("can_add_diagram"):
+        ds = q_data["diagram_suggestion"]
+        context["diagram_suggestion"] = {
+            "type": ds.get("diagram_type", ""),
+            "description": ds.get("diagram_description", ""),
+            "placement": ds.get("where_to_place", "")
+        }
+    
+    # Structure
+    if q_data.get("structure"):
+        context["structure_suggestion"] = q_data["structure"].get("ideal_structure", "")
+    
+    # Presentation/Conclusion
+    if q_data.get("presentation"):
+        pres = q_data["presentation"]
+        context["conclusion_suggestion"] = pres.get("conclusion_quality", "")
+    
+    # Value additions
+    if q_data.get("value_additions"):
+        va = q_data["value_additions"]
+        if va.get("committee_report"):
+            context["key_additions"].append(f"Cite: {va['committee_report']}")
+        if va.get("international_comparison"):
+            context["key_additions"].append(f"Compare with: {va['international_comparison']}")
+        if va.get("way_forward"):
+            context["key_additions"].append(f"Way forward: {va['way_forward']}")
+    
+    return context
+
+
+async def _generate_single_model_answer(
+    llm_service: LLMService,
+    question: str,
+    original_answer: str,
+    improvements: dict,
+    q_data: dict
+) -> str:
+    """Generate a single model answer using LLM"""
+    from app.core.llm_service import ChatMessage
+    
+    # Build the prompt with UPSC-specific word limits
+    marks = q_data.get("marks", 10)
+    
+    # UPSC standard word limits
+    if marks <= 10:
+        word_limit = 150
+    elif marks <= 15:
+        word_limit = 250
+    else:
+        word_limit = 300
+    
+    # Format improvements for prompt
+    improvements_text = ""
+    
+    if improvements.get("top_improvements"):
+        improvements_text += "\n**Top Priority Improvements:**\n"
+        for imp in improvements["top_improvements"]:
+            improvements_text += f"- {imp}\n"
+    
+    if improvements.get("examples_to_add"):
+        improvements_text += "\n**Examples to Include:**\n"
+        for ex in improvements["examples_to_add"][:4]:
+            improvements_text += f"- {ex}\n"
+    
+    if improvements.get("facts_to_add"):
+        improvements_text += "\n**Facts/Data to Add:**\n"
+        for fact in improvements["facts_to_add"][:3]:
+            improvements_text += f"- {fact}\n"
+    
+    if improvements.get("key_additions"):
+        improvements_text += "\n**Key Additions:**\n"
+        for ka in improvements["key_additions"][:5]:
+            improvements_text += f"- {ka}\n"
+    
+    diagram_instruction = ""
+    if improvements.get("diagram_suggestion"):
+        ds = improvements["diagram_suggestion"]
+        diagram_instruction = f"\n**DIAGRAM (place in body, NOT conclusion):** {ds['type']} - {ds['description']}\n"
+        improvements_text += diagram_instruction
+    
+    # Determine if diagram is truly needed based on question type
+    needs_diagram = improvements.get("diagram_suggestion") is not None
+    diagram_text = ""
+    if needs_diagram:
+        ds = improvements["diagram_suggestion"]
+        diagram_text = f"If appropriate, include a simple ASCII/text diagram for: {ds['description']}"
+    
+    prompt = f"""You are an expert UPSC Mains answer writer. Write a **topper-quality model answer** in STRICT UPSC format.
+
+## QUESTION ({marks} marks):
+{question}
+
+## IMPROVEMENTS TO INCORPORATE:
+{improvements_text}
+
+## STRICT FORMAT (follow exactly):
+
+**WORD LIMIT: {word_limit} words**
+
+---
+
+**Introduction:** (20-30 words)
+Write exactly 2 sentences - define the concept and state its relevance.
+
+**Body:**
+
+**1. [First Heading based on question demand]**
+• Point with **key term** and explanation
+• Point with specific example/scheme/data
+
+**2. [Second Heading]**
+• Point with **key term**
+• Point with constitutional/legal reference if applicable
+
+**3. [Third Heading if needed]**
+• Additional relevant points
+
+{f'''**Diagram:** (place here in body if helpful)
+Draw a simple text-based diagram like:
+```
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│  Element 1  │ →  │  Element 2  │ →  │  Element 3  │
+└─────────────┘    └─────────────┘    └─────────────┘
+```
+Only include if it adds value. Do NOT write [DIAGRAM: ...] - either draw it or skip.
+''' if needs_diagram else ''}
+
+**Conclusion:** (20-30 words)
+Write exactly 2 sentences - summarize key point and give way forward.
+
+---
+
+## RULES:
+1. Use **numbered headings** (1, 2, 3) in body
+2. Use **bullet points** (•) under each heading
+3. **Bold** key terms for examiner
+4. Keep within {word_limit} words strictly
+5. NO diagram in conclusion
+6. Do NOT write "[DIAGRAM: ...]" - if diagram needed, DRAW it using ASCII/text boxes
+7. Section labels must be: "Introduction:", "1.", "2.", "3.", "Conclusion:"
+
+Write the complete answer now:"""
+
+    messages = [ChatMessage(role="user", content=prompt)]
+    
+    try:
+        response = await llm_service.chat_completion(
+            messages=messages,
+            temperature=0.4,
+            max_tokens=2000
+        )
+        return response.content
+    except Exception as e:
+        logger.error(f"Failed to generate model answer: {e}")
+        return f"[Error generating model answer: {str(e)}]"
+
+
+@router.get("/{answer_id}/model-answer")
+async def get_model_answer(
+    answer_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get the generated model answer for an answer"""
+    # Verify answer ownership
+    answer = db.query(Answer).filter(
+        Answer.id == answer_id,
+        Answer.user_id == current_user.id
+    ).first()
+    
+    if not answer:
+        raise HTTPException(status_code=404, detail="Answer not found")
+    
+    evaluation = db.query(Evaluation).filter(
+        Evaluation.answer_id == answer_id
+    ).first()
+    
+    if not evaluation:
+        raise HTTPException(status_code=404, detail="Evaluation not found")
+    
+    if not evaluation.model_answer:
+        raise HTTPException(status_code=404, detail="Model answer not generated yet. Call POST /generate-model-answer first.")
+    
+    try:
+        model_data = json.loads(evaluation.model_answer)
+        return {
+            "success": True,
+            "answer_id": answer_id,
+            "questions": model_data.get("questions", []),
+            "generated_at": model_data.get("generated_at", "")
+        }
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Failed to parse model answer data")

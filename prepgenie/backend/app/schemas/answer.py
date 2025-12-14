@@ -28,6 +28,7 @@ class AnswerEvaluationBase(BaseModel):
     coverage: float = 0.0
     tone: float = 0.0
     actionable_data: Optional[str] = None  # JSON string with full actionable evaluation
+    model_answer: Optional[str] = None  # JSON string with AI-enhanced model answers
 
 
 class AnswerEvaluationCreate(AnswerEvaluationBase):
@@ -44,6 +45,7 @@ class AnswerEvaluationUpdate(BaseModel):
     coverage: Optional[float] = None
     tone: Optional[float] = None
     actionable_data: Optional[str] = None
+    model_answer: Optional[str] = None
 
 
 class AnswerEvaluation(AnswerEvaluationBase):
@@ -54,12 +56,37 @@ class AnswerEvaluation(AnswerEvaluationBase):
     strengths: Optional[str] = None
     improvements: Optional[str] = None
     actionable_data: Optional[str] = None
+    model_answer: Optional[str] = None
 
     class Config:
         from_attributes = True
         json_encoders = {
             datetime: lambda v: v.isoformat() if v else None
         }
+
+
+# Model Answer Generation schemas
+class ModelAnswerRequest(BaseModel):
+    """Request for generating model answer"""
+    question_index: Optional[int] = Field(default=0, description="Index of question to generate model answer for (for multi-question PDFs)")
+
+
+class QuestionModelAnswer(BaseModel):
+    """Model answer for a single question"""
+    question_number: int
+    question_text: str
+    original_answer: str
+    model_answer: str
+    improvements_applied: List[str]
+    key_additions: List[str]
+
+
+class ModelAnswerResponse(BaseModel):
+    """Response with generated model answer"""
+    success: bool
+    answer_id: int
+    questions: List[QuestionModelAnswer]
+    generated_at: str
 
 
 # Response schema for API endpoints that need parsed arrays
