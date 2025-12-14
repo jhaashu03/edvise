@@ -33,6 +33,11 @@ class AnswerEvaluation(Base):
     coverage = Column(Float, nullable=False, default=0.0)
     tone = Column(Float, nullable=False, default=0.0)
     evaluated_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # NEW: Store the full actionable evaluation data as JSON
+    # Contains: demand_analysis, structure_analysis, examples, diagram_suggestion, 
+    # value_additions, presentation, top_3_improvements, dimensional_scores, etc.
+    actionable_data = Column(Text, nullable=True)  # JSON string with full evaluation details
 
     # Relationship
     answer = relationship("UploadedAnswer", back_populates="evaluation")

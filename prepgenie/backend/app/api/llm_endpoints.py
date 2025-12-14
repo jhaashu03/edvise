@@ -12,6 +12,20 @@ import os
 from app.core.llm_service import get_llm_service, ChatMessage, LLMService, LLMServiceError
 from app.services.enhanced_comprehensive_analysis import enhanced_comprehensive_analysis_with_topper_comparison
 
+# Import modular prompts for UPSC evaluation
+from app.prompts import (
+    CHAT_SYSTEM_PROMPT,
+    ANSWER_EVALUATION_OUTPUT_FORMAT,
+    get_prompt_version,
+)
+from app.prompts.answer_evaluation import (
+    get_evaluation_prompt,
+    detect_subject_from_question,
+    detect_subject_tags,
+    SubjectType,
+    EVALUATION_BASE_PROMPT,
+)
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -127,9 +141,6 @@ async def chat_endpoint(
             max_tokens=request.max_tokens
         )
 
-        print("------response_text--------")
-        print(response_text);
-        
         # Get provider info
         provider_name = llm_service.provider_name
         model_name = getattr(llm_service.provider, 'model', 'unknown')
@@ -223,18 +234,25 @@ async def analyze_upsc_question(
     llm_service: LLMService = Depends(get_llm_service)
 ):
     """
-    Analyze a UPSC question and provide guidance
+    Analyze a UPSC question and provide guidance.
+    Uses modular prompts with auto subject detection.
     """
     try:
-        system_prompt = """You are an expert UPSC (Union Public Service Commission) exam preparation assistant. 
-        Analyze the given question and provide:
-        1. Subject area and topic
-        2. Type of question (factual, analytical, opinion-based, etc.)
-        3. Key points to cover in the answer
-        4. Suggested approach for answering
-        5. Approximate word count needed
+        # Auto-detect subject from question content
+        detected_subject = detect_subject_from_question(question)
         
-        Be concise but comprehensive in your analysis."""
+        # Get subject-specific analysis context
+        system_prompt = f"""{EVALUATION_BASE_PROMPT}
+
+ANALYZE THIS QUESTION AND PROVIDE:
+1. Subject area and topic (Detected: {detected_subject.value.upper()})
+2. Type of question (factual, analytical, opinion-based, etc.)
+3. Key points to cover in the answer
+4. Suggested approach for answering
+5. Approximate word count needed
+6. UPSC Paper this belongs to (GS-I, GS-II, GS-III, GS-IV, or Optional)
+
+Be concise but comprehensive in your analysis."""
         
         response = await llm_service.simple_chat(
             user_message=f"Analyze this UPSC question: {question}",
@@ -244,8 +262,10 @@ async def analyze_upsc_question(
         
         return {
             "question": question,
+            "detected_subject": detected_subject.value,
             "analysis": response,
-            "provider": llm_service.provider_name
+            "provider": llm_service.provider_name,
+            "prompt_version": get_prompt_version()
         }
         
     except LLMServiceError as e:
@@ -262,27 +282,53 @@ async def evaluate_answer(
     llm_service: LLMService = Depends(get_llm_service)
 ):
     """
-    Comprehensive answer evaluation with detailed feedback and improvement suggestions
+    Comprehensive answer evaluation with detailed feedback and improvement suggestions.
+    
+    Uses modular, subject-specific prompts based on official UPSC syllabus.
+    Auto-detects subject (GS1/GS2/GS3/GS4/Anthropology) from question content.
     """
     try:
-        # Construct comprehensive evaluation prompt
-        evaluation_prompt = f"""You are an expert UPSC evaluator and coaching specialist. Evaluate this student's answer comprehensively and provide detailed feedback for improvement.
+        # Auto-detect subject from question OR use paper hint from exam_context
+        if request.exam_context.paper:
+            # Map paper names to SubjectType
+            paper_map = {
+                "GS-I": SubjectType.GS1, "GS1": SubjectType.GS1, "gs1": SubjectType.GS1,
+                "GS-II": SubjectType.GS2, "GS2": SubjectType.GS2, "gs2": SubjectType.GS2,
+                "GS-III": SubjectType.GS3, "GS3": SubjectType.GS3, "gs3": SubjectType.GS3,
+                "GS-IV": SubjectType.GS4, "GS4": SubjectType.GS4, "gs4": SubjectType.GS4,
+                "Anthropology": SubjectType.ANTHROPOLOGY, "anthropology": SubjectType.ANTHROPOLOGY,
+            }
+            detected_subject = paper_map.get(request.exam_context.paper, detect_subject_from_question(request.question))
+        else:
+            detected_subject = detect_subject_from_question(request.question)
+        
+        logger.info(f"Evaluating answer for subject: {detected_subject.value}")
+        
+        # Get subject-specific evaluation prompt (includes syllabus-aligned rubrics)
+        subject_prompt = get_evaluation_prompt(
+            subject=detected_subject,
+            question=request.question,
+            word_limit=request.exam_context.word_limit,
+            include_rubric=True
+        )
+        
+        # Construct comprehensive evaluation prompt with modular components
+        evaluation_prompt = f"""{subject_prompt}
 
-Question: {request.question}
-
-Student's Answer:
-{request.student_answer}
-
-Exam Context:
+## EXAM CONTEXT:
 - Total Marks: {request.exam_context.marks}
 - Time Limit: {request.exam_context.time_limit} minutes
 - Word Limit: {request.exam_context.word_limit} words
 - Exam Type: {request.exam_context.exam_type}
+- Detected Paper: {detected_subject.value.upper()}
 
-Provide a comprehensive evaluation in this exact JSON format:
+## STUDENT'S ANSWER TO EVALUATE:
+{request.student_answer}
+
+## REQUIRED OUTPUT FORMAT (JSON):
 {{
-    "current_score": "X/Y marks with justification",
-    "potential_score": "X/Y marks if improved",
+    "current_score": "X/{request.exam_context.marks} marks with justification",
+    "potential_score": "X/{request.exam_context.marks} marks if improved",
     "content_analysis": {{
         "coverage_percentage": number,
         "key_points_covered": ["point1", "point2"],
@@ -297,14 +343,14 @@ Provide a comprehensive evaluation in this exact JSON format:
         "flow_and_transitions": "feedback"
     }},
     "improvement_areas": [
-        "Specific improvement 1",
+        "Specific improvement 1 relevant to {detected_subject.value}",
         "Specific improvement 2",
         "Specific improvement 3"
     ],
     "aptitude_tips": [
         "How to leverage existing knowledge better",
         "Smart writing techniques for partial knowledge",
-        "Strategic approach for maximum marks"
+        "Strategic approach for maximum marks in {detected_subject.value}"
     ],
     "current_affairs_integration": [
         "Recent development 1 that could be added",
@@ -324,7 +370,7 @@ Provide a comprehensive evaluation in this exact JSON format:
     }}
 }}
 
-Focus on actionable, specific feedback that helps the student improve their score."""
+Focus on actionable, SUBJECT-SPECIFIC feedback based on {detected_subject.value.upper()} syllabus and rubrics."""
 
         response = await llm_service.simple_chat(
             user_message=evaluation_prompt,
@@ -385,52 +431,70 @@ async def aptitude_enhancement(
     llm_service: LLMService = Depends(get_llm_service)
 ):
     """
-    Provide aptitude-based answer enhancement strategies for students with partial knowledge
+    Provide aptitude-based answer enhancement strategies for students with partial knowledge.
+    
+    Uses modular prompts with subject-specific strategies based on UPSC syllabus.
     """
     try:
-        aptitude_prompt = f"""You are an expert UPSC answer writing coach specializing in aptitude techniques. Help a student write the best possible answer using smart strategies even with partial knowledge.
+        # Auto-detect subject for subject-specific aptitude tips
+        detected_subject = detect_subject_from_question(request.question)
+        
+        # Get subject-specific context for better aptitude guidance
+        subject_context = get_evaluation_prompt(
+            subject=detected_subject,
+            question=request.question,
+            include_rubric=False  # Just need the context, not full rubric
+        )
+        
+        aptitude_prompt = f"""You are an expert UPSC answer writing coach specializing in aptitude techniques for {detected_subject.value.upper()}.
 
-Question: {request.question}
+SUBJECT CONTEXT:
+{subject_context[:1500]}  # Include relevant subject expectations
 
-Student's Current Knowledge:
-- Known concepts: {', '.join(request.current_knowledge.known_concepts)}
-- Uncertain areas: {', '.join(request.current_knowledge.uncertain_areas)}
-- Unknown areas: {', '.join(request.current_knowledge.unknown_areas)}
+QUESTION: {request.question}
+
+STUDENT'S CURRENT KNOWLEDGE:
+- Known concepts: {', '.join(request.current_knowledge.known_concepts) or 'Not specified'}
+- Uncertain areas: {', '.join(request.current_knowledge.uncertain_areas) or 'Not specified'}
+- Unknown areas: {', '.join(request.current_knowledge.unknown_areas) or 'Not specified'}
 - Confidence level: {request.current_knowledge.confidence_level}
 
-Target: {request.target_marks} marks
-Enhancement Focus: {', '.join(request.enhancement_focus)}
+TARGET: {request.target_marks} marks
+ENHANCEMENT FOCUS: {', '.join(request.enhancement_focus)}
+DETECTED PAPER: {detected_subject.value.upper()}
 
-Provide strategic guidance in this exact JSON format:
+Help this student write the BEST POSSIBLE answer using smart strategies even with partial knowledge.
+Provide {detected_subject.value.upper()}-SPECIFIC guidance in this exact JSON format:
+
 {{
-    "strategic_approach": "Overall strategy to maximize marks with available knowledge",
+    "strategic_approach": "Overall strategy to maximize marks with available knowledge for {detected_subject.value}",
     "introduction_enhancement": {{
         "approach": "How to start strongly with known concepts",
         "key_terms_to_define": ["term1", "term2"],
-        "opening_line_suggestion": "Suggested opening approach"
+        "opening_line_suggestion": "Suggested opening approach for {detected_subject.value}"
     }},
     "content_maximization": [
-        "How to expand known concepts effectively",
+        "How to expand known concepts effectively in {detected_subject.value}",
         "Logical reasoning techniques for unknown areas",
         "General principles to apply when specifics are unclear"
     ],
     "current_affairs_integration": [
-        "Recent development 1 that student can mention",
+        "Recent {detected_subject.value}-relevant development 1",
         "Policy initiative that connects to the topic",
         "Contemporary example that adds value"
     ],
     "diagram_strategy": {{
-        "recommended_diagram": "Type of diagram that would help",
+        "recommended_diagram": "Type of diagram effective for {detected_subject.value}",
         "simple_elements": ["element1", "element2"],
         "why_effective": "How this diagram boosts marks"
     }},
     "conclusion_technique": {{
-        "approach": "How to conclude effectively",
+        "approach": "How to conclude effectively for {detected_subject.value}",
         "forward_looking_statement": "Future-oriented conclusion approach",
         "key_message": "Main takeaway to emphasize"
     }},
     "writing_tactics": [
-        "Smart phrase usage for analytical depth",
+        "Smart phrase usage for analytical depth in {detected_subject.value}",
         "Transition techniques between known and unknown areas",
         "Presentation tricks for maximum impact"
     ],
@@ -439,7 +503,7 @@ Provide strategic guidance in this exact JSON format:
         "analytical_demonstration": "How to show analytical thinking", 
         "presentation_boost": "Formatting and structure for extra marks"
     }},
-    "sample_framework": "A paragraph-by-paragraph framework demonstrating these techniques"
+    "sample_framework": "A paragraph-by-paragraph framework demonstrating these techniques for {detected_subject.value}"
 }}
 
 Focus on practical, immediately applicable techniques that leverage the student's existing knowledge."""
@@ -664,11 +728,22 @@ async def comprehensive_question_analysis_direct(
     student_answer: str = "",
     exam_context: dict = None,
     llm_service: LLMService = None,
-    question_number: str = None  # Add question number parameter
+    question_number: str = None,  # Add question number parameter
+    evaluation_type: str = "dimensional",  # Add evaluation type parameter
+    paper_subject: str = None  # Paper-level subject override (gs1, gs2, gs3, gs4, anthropology)
 ) -> dict:
     """
-    Enhanced comprehensive question analysis with actual topper comparison via vector similarity
-    Returns structured analysis with real topper examples and feedback
+    Comprehensive question analysis with configurable evaluation type
+    Returns structured analysis - with or without topper comparison based on evaluation_type
+    
+    Args:
+        question: The question text
+        student_answer: The student's answer text
+        exam_context: Exam context (marks, time_limit, word_limit, exam_type)
+        llm_service: LLM service instance
+        question_number: Question number for logging
+        evaluation_type: Type of evaluation ("dimensional" or "topper_comparison")
+        paper_subject: Optional paper-level subject override. If provided, skips auto-detection.
     """
     # Extract question number for logging if not provided
     if not question_number:
@@ -686,30 +761,269 @@ async def comprehensive_question_analysis_direct(
         }
     
     try:
-        # Use the enhanced comprehensive analysis that includes real topper comparison
-        logger.info(f"Starting enhanced comprehensive analysis for {question_number}: {question[:50]}...")
+        # For dimensional evaluation, use standard 13D analysis without topper comparison
+        if evaluation_type == "dimensional":
+            logger.info(f"Starting 13-dimensional analysis for {question_number}: {question[:50]}...")
+            return await _dimensional_only_analysis(question, student_answer, exam_context, llm_service, question_number, paper_subject)
         
-        result = await enhanced_comprehensive_analysis_with_topper_comparison(
-            question=question,
-            student_answer=student_answer,
-            exam_context=exam_context,
-            llm_service=llm_service
-        )
-        
-        if result.get("success"):
-            logger.info(f"✅ Enhanced comprehensive analysis completed successfully for {question_number} with topper comparison")
-            return result
+        # For topper comparison, use enhanced analysis with topper comparison
         else:
-            logger.warning(f"⚠️ Enhanced analysis failed for {question_number}, falling back to standard analysis")
-            logger.warning(f"🔍 FALLBACK REASON for {question_number}: Enhanced analysis returned success=False. Error: {result.get('error', 'Unknown error')}")
-            # Fall back to original implementation if enhanced version fails
-            return await _fallback_comprehensive_analysis(question, student_answer, exam_context, llm_service, question_number)
+            logger.info(f"Starting enhanced comprehensive analysis for {question_number}: {question[:50]}...")
+            
+            result = await enhanced_comprehensive_analysis_with_topper_comparison(
+                question=question,
+                student_answer=student_answer,
+                exam_context=exam_context,
+                llm_service=llm_service
+            )
+            
+            if result.get("success"):
+                logger.info(f"✅ Enhanced comprehensive analysis completed successfully for {question_number} with topper comparison")
+                return result
+            else:
+                logger.warning(f"⚠️ Enhanced analysis failed for {question_number}, falling back to standard analysis")
+                logger.warning(f"🔍 FALLBACK REASON for {question_number}: Enhanced analysis returned success=False. Error: {result.get('error', 'Unknown error')}")
+                # Fall back to dimensional analysis if enhanced version fails
+                return await _dimensional_only_analysis(question, student_answer, exam_context, llm_service, question_number)
             
     except Exception as e:
-        logger.error(f"❌ ERROR in enhanced comprehensive analysis for {question_number}: {e}")
+        logger.error(f"❌ ERROR in comprehensive analysis for {question_number}: {e}")
         logger.error(f"🔍 FALLBACK REASON for {question_number}: Exception occurred - {type(e).__name__}: {str(e)}")
-        # Fall back to original implementation on any error
-        return await _fallback_comprehensive_analysis(question, student_answer, exam_context, llm_service, question_number)
+        # Fall back to dimensional analysis on any error
+        return await _dimensional_only_analysis(question, student_answer, exam_context, llm_service, question_number)
+
+
+async def _dimensional_only_analysis(
+    question: str,
+    student_answer: str = "",
+    exam_context: dict = None,
+    llm_service: LLMService = None,
+    question_number: str = None,
+    paper_subject: str = None  # Paper-level subject override
+) -> dict:
+    """
+    Pure 13-dimensional analysis without topper comparison
+    Returns structured analysis focused only on dimensional scoring
+    
+    Args:
+        question: The question text
+        student_answer: The student's answer text
+        exam_context: Exam context (marks, time_limit, word_limit, exam_type)
+        llm_service: LLM service instance
+        question_number: Question number for logging
+        paper_subject: Optional paper-level subject override. If provided, uses this instead of auto-detection.
+    """
+    if not question_number:
+        question_number = "Unknown"
+        
+    logger.info(f"🎯 PERFORMING 13-DIMENSIONAL ANALYSIS for {question_number}: {question[:50]}...")
+    
+    if not llm_service:
+        llm_service = get_llm_service()
+    
+    if not exam_context:
+        exam_context = {
+            "marks": 15,
+            "time_limit": 20,
+            "word_limit": 250,
+            "exam_type": "UPSC Mains"
+        }
+    
+    try:
+        # Use paper-level subject if provided, otherwise auto-detect
+        if paper_subject:
+            # Map paper_subject string to SubjectType enum
+            subject_map = {
+                "gs1": SubjectType.GS1,
+                "gs2": SubjectType.GS2,
+                "gs3": SubjectType.GS3,
+                "gs4": SubjectType.GS4,
+                "anthropology": SubjectType.ANTHROPOLOGY
+            }
+            detected_subject = subject_map.get(paper_subject.lower(), SubjectType.GENERAL)
+            logger.info(f"📋 Using paper-level subject for {question_number}: {detected_subject.value.upper()} (override)")
+        else:
+            # Auto-detect subject with detailed tagging for debugging
+            subject_tags = detect_subject_tags(question)
+            detected_subject = subject_tags["primary_subject"]
+            
+            # Log detailed detection info
+            if subject_tags["tags"]:
+                tags_str = ", ".join([f"{t['subject'].value}({t['score']})" for t in subject_tags["tags"][:3]])
+                logger.info(f"🔍 Subject detection for {question_number}: {detected_subject.value.upper()} | Tags: {tags_str}")
+                
+                # Log matched keywords for debugging
+                if subject_tags["detected_keywords"]:
+                    for subj, kws in subject_tags["detected_keywords"].items():
+                        if kws:
+                            logger.info(f"   → {subj.value}: matched [{', '.join(kws[:5])}]")
+            else:
+                logger.info(f"🔍 Auto-detected subject for {question_number}: {detected_subject.value} (no keywords matched)")
+        
+        # Get subject-specific evaluation context
+        subject_context = get_evaluation_prompt(
+            subject=detected_subject,
+            question=question,
+            word_limit=exam_context.get('word_limit', 250),
+            include_rubric=True
+        )
+        
+        marks = exam_context.get('marks', 10)
+        word_limit = exam_context.get('word_limit', 150)
+        
+        # REDESIGNED: Actionable UPSC-focused evaluation prompt
+        analysis_prompt = f"""You are a UPSC CSE Mains examiner and mentor. Evaluate this answer with **actionable, specific feedback**.
+
+## QUESTION ({marks} marks):
+{question}
+
+## STUDENT'S ANSWER:
+{student_answer or "No answer provided"}
+
+## EVALUATION INSTRUCTIONS:
+- Be SPECIFIC to this answer - NO generic advice
+- Focus on what's MISSING and what can be IMPROVED
+- Suggest EXACT examples, facts, diagrams the student should add
+- Be concise and to-the-point
+
+Respond in this EXACT JSON format:
+
+{{
+    "detected_subject": "{detected_subject.value}",
+    
+    "demand_analysis": {{
+        "score": 7.0,
+        "question_demands": ["List 2-3 key demands of the question"],
+        "demands_met": ["Which demands were addressed"],
+        "demands_missed": ["Which demands were NOT addressed or poorly covered"],
+        "verdict": "FULLY MET / PARTIALLY MET / NOT MET"
+    }},
+    
+    "structure": {{
+        "score": 7.0,
+        "current_structure": "Brief description of how answer is currently structured",
+        "ideal_structure": "How a topper would structure this answer (be specific)",
+        "suggestion": "One specific structural improvement"
+    }},
+    
+    "content_quality": {{
+        "score": 7.0,
+        "facts_used": ["List key facts/data points student mentioned"],
+        "facts_missing": ["2-3 specific facts/data that SHOULD have been included"],
+        "current_affairs_link": "Specific recent news/development that could be linked",
+        "keywords_to_add": ["3-4 technical terms or keywords that would impress examiner"]
+    }},
+    
+    "examples": {{
+        "score": 6.0,
+        "examples_given": ["Examples student used"],
+        "examples_to_add": ["2-3 SPECIFIC examples that should be added - be precise (scheme names, case studies, countries, committees)"],
+        "constitutional_legal_refs": "Any Article, Act, or SC judgment that applies"
+    }},
+    
+    "diagram_suggestion": {{
+        "can_add_diagram": true,
+        "diagram_type": "flowchart/table/map/timeline/mind-map/organizational-chart/none",
+        "diagram_description": "Exactly what the diagram should show (e.g., 'Flowchart showing: Policy → Implementation → Monitoring → Evaluation')",
+        "where_to_place": "After introduction / Before conclusion / etc."
+    }},
+    
+    "value_additions": {{
+        "score": 6.5,
+        "topper_tips": ["2-3 specific things that would make this a topper-quality answer"],
+        "committee_report": "Relevant committee/report to cite (if any)",
+        "international_comparison": "Country/international example to add (if relevant)",
+        "way_forward": "Specific way forward points to strengthen conclusion"
+    }},
+    
+    "presentation": {{
+        "score": 7.0,
+        "word_count_assessment": "Appropriate / Too short / Too long for {marks} marks",
+        "formatting_tips": "Specific formatting improvement (underlining, spacing, headings)",
+        "conclusion_quality": "Strong / Weak / Missing - with specific suggestion"
+    }},
+    
+    "overall_score": 7.0,
+    "quick_verdict": "One line summary: What's good and what needs work",
+    "top_3_improvements": [
+        "Most important improvement with specific action",
+        "Second most important",
+        "Third most important"
+    ],
+    "success": true
+}}
+
+CRITICAL: Be SPECIFIC - name actual schemes, articles, committees, examples. No generic advice like "add more examples" - say WHICH examples."""
+
+        messages = [
+            ChatMessage(role="user", content=analysis_prompt)
+        ]
+        
+        response = await llm_service.chat_completion(
+            messages=messages,
+            temperature=0.3,
+            max_tokens=2500  # Increased for detailed actionable feedback
+        )
+        
+        # Parse JSON response
+        try:
+            result = json.loads(response.content)
+            result["success"] = True
+            
+            # Add backward-compatible dimensional_scores for frontend
+            result["dimensional_scores"] = {
+                "Structure": {"score": result.get("structure", {}).get("score", 7.0), "feedback": result.get("structure", {}).get("suggestion", "")},
+                "Coverage": {"score": result.get("demand_analysis", {}).get("score", 7.0), "feedback": f"Demands missed: {', '.join(result.get('demand_analysis', {}).get('demands_missed', []))}"},
+                "Tone_and_Language": {"score": 7.5, "feedback": "Language appropriate for UPSC"},
+                "Analytical_Thinking": {"score": result.get("content_quality", {}).get("score", 7.0), "feedback": "See content quality section"},
+                "Factual_Accuracy": {"score": result.get("content_quality", {}).get("score", 7.0), "feedback": f"Missing facts: {', '.join(result.get('content_quality', {}).get('facts_missing', [])[:2])}"},
+                "Conceptual_Understanding": {"score": result.get("content_quality", {}).get("score", 7.0), "feedback": "See content analysis"},
+                "Examples_and_Illustrations": {"score": result.get("examples", {}).get("score", 6.0), "feedback": f"Add: {', '.join(result.get('examples', {}).get('examples_to_add', [])[:2])}"},
+                "Balanced_Perspective": {"score": 7.0, "feedback": "See value additions"},
+                "Conclusion": {"score": result.get("presentation", {}).get("score", 7.0), "feedback": result.get("presentation", {}).get("conclusion_quality", "")},
+                "Relevance": {"score": result.get("demand_analysis", {}).get("score", 7.0), "feedback": result.get("demand_analysis", {}).get("verdict", "")},
+                "Clarity": {"score": 7.5, "feedback": "See presentation tips"},
+                "Depth": {"score": result.get("value_additions", {}).get("score", 6.5), "feedback": f"Tips: {', '.join(result.get('value_additions', {}).get('topper_tips', [])[:1])}"},
+                "Presentation": {"score": result.get("presentation", {}).get("score", 7.0), "feedback": result.get("presentation", {}).get("formatting_tips", "")}
+            }
+            
+            # Map strengths/improvements from new format
+            result["strengths"] = result.get("demand_analysis", {}).get("demands_met", [])
+            result["improvements"] = result.get("top_3_improvements", [])
+            result["detailed_feedback"] = result.get("quick_verdict", "")
+            
+            logger.info(f"✅ Actionable evaluation completed for {question_number}")
+            return result
+        except json.JSONDecodeError:
+            logger.warning(f"⚠️ JSON parsing failed for {question_number}, using fallback structure")
+            return {
+                "dimensional_scores": {
+                    "Structure": {"score": 6.5, "feedback": "Analysis completed with basic scoring"},
+                    "Coverage": {"score": 6.0, "feedback": "Content coverage evaluated"},
+                    "Tone_and_Language": {"score": 7.0, "feedback": "Language quality assessed"}
+                },
+                "overall_score": 6.5,
+                "detailed_feedback": response.content,
+                "strengths": ["Analysis completed", "Systematic evaluation", "Comprehensive review"],
+                "improvements": ["Enhance specific analysis", "Improve detailed feedback", "Strengthen evaluation"],
+                "success": True
+            }
+            
+    except Exception as e:
+        logger.error(f"❌ ERROR in 13-dimensional analysis for {question_number}: {e}")
+        return {
+            "dimensional_scores": {
+                "Structure": {"score": 6.0, "feedback": "Error in analysis - using fallback"},
+                "Coverage": {"score": 6.0, "feedback": "Error in analysis - using fallback"},
+                "Tone_and_Language": {"score": 6.0, "feedback": "Error in analysis - using fallback"}
+            },
+            "overall_score": 6.0,
+            "detailed_feedback": f"Analysis failed due to error: {str(e)}",
+            "strengths": ["Fallback analysis provided"],
+            "improvements": ["Retry analysis", "Check system configuration"],
+            "success": False,
+            "error": str(e)
+        }
 
 
 async def _fallback_comprehensive_analysis(
@@ -741,10 +1055,25 @@ async def _fallback_comprehensive_analysis(
         }
     
     try:
-        # Use enhanced analysis prompt with specificity requirements
-        analysis_prompt = f"""You are an expert UPSC evaluator with 13-dimensional analysis capabilities. 
+        # Auto-detect subject for subject-specific fallback analysis
+        detected_subject = detect_subject_from_question(question)
+        logger.info(f"🔍 Fallback analysis - Detected subject for {question_number}: {detected_subject.value}")
+        
+        # Get subject-specific context for better evaluation
+        subject_context = get_evaluation_prompt(
+            subject=detected_subject,
+            question=question,
+            include_rubric=True
+        )
+        
+        # Use enhanced analysis prompt with subject-specific requirements
+        analysis_prompt = f"""You are an expert UPSC evaluator specializing in {detected_subject.value.upper()} paper with 14-dimensional analysis capabilities.
+
+## SUBJECT-SPECIFIC CONTEXT ({detected_subject.value.upper()}):
+{subject_context[:1500]}
 
 **CRITICAL: BE SPECIFIC TO THIS QUESTION AND STUDENT'S ACTUAL CONTENT - NO GENERIC RESPONSES**
+Apply {detected_subject.value.upper()}-specific evaluation criteria.
 
 Question: {question}
 
@@ -756,6 +1085,7 @@ Exam Context:
 - Time Limit: {exam_context.get('time_limit', 20)} minutes
 - Word Limit: {exam_context.get('word_limit', 250)} words
 - Exam Type: {exam_context.get('exam_type', 'UPSC Mains')}
+- Detected Paper: {detected_subject.value.upper()}
 
 ANALYSIS REQUIREMENTS:
 1. Reference specific topics/concepts from the question

@@ -66,7 +66,8 @@ def create_answer_evaluation(db: Session, evaluation: AnswerEvaluationCreate, an
         improvements=evaluation.improvements,
         structure=evaluation.structure,
         coverage=evaluation.coverage,
-        tone=evaluation.tone
+        tone=evaluation.tone,
+        actionable_data=evaluation.actionable_data  # Store full actionable evaluation data
     )
     db.add(db_evaluation)
     db.commit()

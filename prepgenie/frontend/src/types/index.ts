@@ -89,12 +89,101 @@ export interface AnswerEvaluation {
   score: number;
   maxScore: number;
   feedback: string;
-  strengths: string[];
-  improvements: string[];
+  strengths: string[] | string;
+  improvements: string[] | string;
   structure: number;
   coverage: number;
   tone: number;
   evaluatedAt: string;
+  
+  // NEW: Actionable evaluation format
+  detected_subject?: string;
+  demand_analysis?: DemandAnalysis;
+  structure_analysis?: StructureAnalysis;
+  content_quality?: ContentQuality;
+  examples?: ExamplesAnalysis;
+  diagram_suggestion?: DiagramSuggestion;
+  value_additions?: ValueAdditions;
+  presentation?: PresentationAnalysis;
+  overall_score?: number;
+  quick_verdict?: string;
+  top_3_improvements?: string[];
+  dimensional_scores?: Record<string, DimensionalScore>;
+  
+  // Multi-question PDF support
+  all_questions?: QuestionEvaluation[];
+}
+
+export interface DemandAnalysis {
+  question_demands: string[];
+  demands_met: string[];
+  demands_missed: string[];
+  verdict: 'FULLY MET' | 'PARTIALLY MET' | 'NOT MET';
+}
+
+export interface StructureAnalysis {
+  score: number;
+  ideal_structure: string;
+  suggestion: string;
+}
+
+export interface ContentQuality {
+  facts_missing: string[];
+  current_affairs_link: string;
+  keywords_to_add: string[];
+}
+
+export interface ExamplesAnalysis {
+  examples_to_add: string[];
+  constitutional_legal_refs: string;
+}
+
+export interface DiagramSuggestion {
+  can_add_diagram: boolean;
+  diagram_type: string;
+  diagram_description: string;
+  where_to_place: string;
+}
+
+export interface ValueAdditions {
+  score: number;
+  topper_tips: string[];
+  committee_report: string;
+  international_comparison: string;
+  way_forward: string;
+}
+
+export interface PresentationAnalysis {
+  score: number;
+  word_count_assessment: string;
+  formatting_tips: string;
+  conclusion_quality: string;
+}
+
+export interface DimensionalScore {
+  score: number;
+  feedback: string;
+}
+
+// Individual question evaluation for multi-question PDFs
+export interface QuestionEvaluation {
+  question_number: number;
+  question_text: string;
+  marks: number;
+  detected_subject?: string;
+  demand_analysis?: DemandAnalysis;
+  structure?: StructureAnalysis;
+  content_quality?: ContentQuality;
+  examples?: ExamplesAnalysis;
+  diagram_suggestion?: DiagramSuggestion;
+  value_additions?: ValueAdditions;
+  presentation?: PresentationAnalysis;
+  overall_score?: number;
+  quick_verdict?: string;
+  top_3_improvements?: string[];
+  dimensional_scores?: Record<string, DimensionalScore>;
+  strengths?: string[];
+  improvements?: string[];
 }
 
 export interface ChatMessage {

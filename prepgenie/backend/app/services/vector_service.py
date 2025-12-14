@@ -23,7 +23,7 @@ class VectorService:
     def __init__(self):
         self.collection_name = "pyq_embeddings"
         self.model = None  # Initialize later only if service is enabled
-        self.dimension = 384  # Dimension for all-MiniLM-L6-v2
+        self.dimension = 1024  # Dimension for BGE-large-en-v1.5
         self.connection_alias = "default"
         self._connected = False
         self._collection = None
@@ -35,7 +35,7 @@ class VectorService:
             
         # Only initialize model if service is enabled
         try:
-            self.model = SentenceTransformer('all-MiniLM-L6-v2')
+            self.model = SentenceTransformer('BAAI/bge-large-en-v1.5')
         except Exception as e:
             logger.warning(f"Failed to initialize SentenceTransformer: {e}")
             logger.info("Vector service will be disabled due to model initialization failure")

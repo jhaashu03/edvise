@@ -149,6 +149,34 @@ class ApiService {
     return response.data;
   }
 
+  async startDimensionalEvaluation(answerId: string): Promise<{task_id?: string, message: string}> {
+    const response: AxiosResponse<{task_id?: string, message: string}> = await this.api.post(`/answers/${answerId}/evaluate/dimensional`);
+    return response.data;
+  }
+
+  async startTopperComparisonEvaluation(answerId: string): Promise<{task_id?: string, message: string}> {
+    const response: AxiosResponse<{task_id?: string, message: string}> = await this.api.post(`/answers/${answerId}/evaluate/topper-comparison`);
+    return response.data;
+  }
+
+  async getEvaluationOptions(): Promise<{
+    dimensional: {
+      name: string;
+      description: string;
+      features: string[];
+      estimated_time: string;
+    };
+    topper_comparison: {
+      name: string;
+      description: string;
+      features: string[];
+      estimated_time: string;
+    };
+  }> {
+    const response = await this.api.get('/answers/evaluation-options');
+    return response.data;
+  }
+
   // Chat
   async sendChatMessage(message: string, conversationId?: string): Promise<ChatMessage> {
     const payload: any = { message };

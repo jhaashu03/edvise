@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { apiService } from '../services/api';
-import { UploadedAnswer, AnswerEvaluation } from '../types';
+import { UploadedAnswer, AnswerEvaluation, QuestionEvaluation } from '../types';
 import {
   DocumentArrowUpIcon,
   DocumentTextIcon,
@@ -10,9 +10,12 @@ import {
   ChevronDownIcon,
   ChevronUpIcon,
   XMarkIcon,
+  SparklesIcon,
+  AcademicCapIcon,
 } from '@heroicons/react/24/outline';
 import { ProgressModal } from '../components/ProgressModal';
 import { useProgressTracker } from '../hooks/useProgressTracker';
+import { ActionableEvaluationCard } from '../components/ActionableEvaluationCard';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -27,17 +30,17 @@ const AnswersPage: React.FC = () => {
   });
   const [uploadLoading, setUploadLoading] = useState(false);
   const [expandedEvaluations, setExpandedEvaluations] = useState<Set<string>>(new Set());
+  const [selectedQuestions, setSelectedQuestions] = useState<Record<string, number>>({});  // Track selected question per answer
   
   // Progress tracking for modal
   const { isVisible, taskId, showProgress, hideProgress, handleComplete, handleError } = useProgressTracker({
-    onComplete: (taskId, success) => {
-      console.log(`Processing ${success ? 'completed' : 'failed'} for task ${taskId}`);
+    onComplete: (_taskId, success) => {
       if (success) {
         loadAnswers(); // Reload answers after successful processing
       }
     },
-    onError: (taskId, error) => {
-      console.error(`Processing error for task ${taskId}:`, error);
+    onError: (_taskId, error) => {
+      console.error('Processing error:', error);
     }
   });
 
@@ -48,19 +51,40 @@ const AnswersPage: React.FC = () => {
   const loadAnswers = async () => {
     try {
       const data = await apiService.getMyAnswers();
-      // Parse JSON strings for strengths and improvements
+      
+      // Parse JSON strings for strengths and improvements with error handling
       const processedAnswers = data.map(answer => {
         if (answer.evaluation) {
+          let strengths: string[] = [];
+          let improvements: string[] = [];
+          
+          // Safely parse JSON strings
+          if (typeof answer.evaluation.strengths === 'string') {
+            try {
+              strengths = JSON.parse(answer.evaluation.strengths);
+            } catch {
+              strengths = [answer.evaluation.strengths]; // Convert to array if parsing fails
+            }
+          } else if (Array.isArray(answer.evaluation.strengths)) {
+            strengths = answer.evaluation.strengths;
+          }
+          
+          if (typeof answer.evaluation.improvements === 'string') {
+            try {
+              improvements = JSON.parse(answer.evaluation.improvements);
+            } catch {
+              improvements = [answer.evaluation.improvements]; // Convert to array if parsing fails
+            }
+          } else if (Array.isArray(answer.evaluation.improvements)) {
+            improvements = answer.evaluation.improvements;
+          }
+          
           return {
             ...answer,
             evaluation: {
               ...answer.evaluation,
-              strengths: typeof answer.evaluation.strengths === 'string' 
-                ? JSON.parse(answer.evaluation.strengths) 
-                : answer.evaluation.strengths,
-              improvements: typeof answer.evaluation.improvements === 'string'
-                ? JSON.parse(answer.evaluation.improvements)
-                : answer.evaluation.improvements
+              strengths,
+              improvements
             }
           };
         }
@@ -91,6 +115,27 @@ const AnswersPage: React.FC = () => {
     setExpandedEvaluations(newExpanded);
   };
 
+  const handleStartEvaluation = async (answerId: string, evaluationType: 'dimensional' | 'topper-comparison') => {
+    try {
+      let response;
+      if (evaluationType === 'dimensional') {
+        response = await apiService.startDimensionalEvaluation(answerId);
+      } else {
+        response = await apiService.startTopperComparisonEvaluation(answerId);
+      }
+
+      // Show progress modal if we have a task_id
+      if (response.task_id) {
+        showProgress(response.task_id);
+      }
+
+      // Reload answers to show updated status
+      loadAnswers();
+    } catch (error) {
+      console.error(`Failed to start ${evaluationType} evaluation:`, error);
+    }
+  };
+
   const handleUpload = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!uploadForm.content && !uploadForm.file) return;
@@ -101,24 +146,11 @@ const AnswersPage: React.FC = () => {
       const contentToSend = uploadForm.content || 
         (uploadForm.file ? `Answer uploaded via PDF file: ${uploadForm.file.name}` : '');
       
-      const response = await apiService.uploadAnswer(
+      await apiService.uploadAnswer(
         uploadForm.questionId || 'sample-question-id', // In real app, this would be selected
         contentToSend,
         uploadForm.file || undefined
       );
-
-      console.log('🚀 Upload response:', response);
-      console.log('🎯 Upload form file:', uploadForm.file);
-      console.log('🔍 Task ID from response:', response.task_id);
-
-      // Show modal progress if we have a task_id
-      if (response.task_id && uploadForm.file) {
-        console.log('✅ Calling showProgress with task_id:', response.task_id);
-        showProgress(response.task_id);
-        console.log('📊 Progress state after showProgress call - isVisible:', isVisible, 'taskId:', taskId);
-      } else {
-        console.log('❌ Not showing progress modal - task_id:', response.task_id, 'file:', uploadForm.file);
-      }
 
       setUploadForm({ questionId: '', content: '', file: null });
       setShowUploadForm(false);
@@ -352,134 +384,368 @@ const AnswersPage: React.FC = () => {
                   {/* Enhanced Evaluation Section */}
                   {answer.evaluation ? (
                     <div className="mt-6 pt-6 border-t border-gray-200">
-                      {/* Evaluation Summary Card */}
-                      <div className="bg-gradient-to-r from-blue-50 to-green-50 rounded-lg p-4 mb-4">
-                        <div className="flex items-center justify-between mb-3">
-                          <h4 className="text-lg font-semibold text-gray-900 flex items-center">
-                            <CheckCircleIcon className="h-5 w-5 text-green-500 mr-2" />
-                            Evaluation Complete
-                          </h4>
-                          <button
-                            onClick={() => toggleEvaluationExpanded(answer.id)}
-                            className="inline-flex items-center px-3 py-1 bg-white rounded-full text-sm font-medium text-primary-600 hover:bg-primary-50 transition-colors border border-primary-200"
-                          >
-                            <span>{expandedEvaluations.has(answer.id) ? 'Hide Details' : 'View Details'}</span>
-                            {expandedEvaluations.has(answer.id) ? (
-                              <ChevronUpIcon className="h-4 w-4 ml-1" />
-                            ) : (
-                              <ChevronDownIcon className="h-4 w-4 ml-1" />
-                            )}
-                          </button>
+                      {/* Check if we have the new actionable format */}
+                      {(answer.evaluation.demand_analysis || answer.evaluation.top_3_improvements || answer.evaluation.dimensional_scores || answer.evaluation.all_questions) ? (
+                        <>
+                          {/* New Actionable Evaluation Display */}
+                          <div className="flex items-center justify-between mb-4">
+                            <div className="flex items-center gap-2">
+                              <SparklesIcon className="h-5 w-5 text-indigo-500" />
+                              <span className="text-sm font-medium text-gray-600">
+                                AI-Powered Analysis
+                                {answer.evaluation.all_questions && answer.evaluation.all_questions.length > 1 && (
+                                  <span className="ml-2 px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full text-xs">
+                                    {answer.evaluation.all_questions.length} Questions
+                                  </span>
+                                )}
+                              </span>
+                            </div>
+                            <button
+                              onClick={() => toggleEvaluationExpanded(answer.id)}
+                              className="inline-flex items-center px-3 py-1.5 bg-indigo-50 rounded-full text-sm font-medium text-indigo-600 hover:bg-indigo-100 transition-colors"
+                            >
+                              <span>{expandedEvaluations.has(answer.id) ? 'Collapse' : 'Expand Full Analysis'}</span>
+                              {expandedEvaluations.has(answer.id) ? (
+                                <ChevronUpIcon className="h-4 w-4 ml-1" />
+                              ) : (
+                                <ChevronDownIcon className="h-4 w-4 ml-1" />
+                              )}
+                            </button>
+                          </div>
+                          
+                          {/* Quick Score Summary */}
+                          {!expandedEvaluations.has(answer.id) && (
+                            <div className="bg-gradient-to-r from-indigo-50 to-purple-50 rounded-xl p-4 mb-4">
+                              <div className="flex items-center justify-between">
+                                <div>
+                                  <div className="text-3xl font-bold text-indigo-600">
+                                    {Number(answer.evaluation.overall_score || answer.evaluation.score).toFixed(1)}/{answer.evaluation.maxScore}
+                                  </div>
+                                  <div className="text-sm text-gray-600 mt-1">
+                                    {answer.evaluation.quick_verdict || 'Click to view detailed analysis'}
+                                  </div>
+                                </div>
+                                {answer.evaluation.demand_analysis?.verdict && (
+                                  <span className={`px-3 py-1.5 rounded-full text-sm font-medium ${
+                                    answer.evaluation.demand_analysis.verdict === 'FULLY MET' 
+                                      ? 'bg-emerald-100 text-emerald-700'
+                                      : answer.evaluation.demand_analysis.verdict === 'PARTIALLY MET'
+                                      ? 'bg-amber-100 text-amber-700'
+                                      : 'bg-rose-100 text-rose-700'
+                                  }`}>
+                                    {answer.evaluation.demand_analysis.verdict}
+                                  </span>
+                                )}
+                              </div>
+                              
+                              {/* Multi-question preview */}
+                              {answer.evaluation.all_questions && answer.evaluation.all_questions.length > 1 && (
+                                <div className="mt-4 pt-4 border-t border-indigo-100">
+                                  <p className="text-xs uppercase tracking-wide text-indigo-600 mb-2">📋 Questions in this PDF</p>
+                                  <div className="flex flex-wrap gap-2">
+                                    {answer.evaluation.all_questions.map((q, idx) => (
+                                      <span key={idx} className="px-2 py-1 bg-white rounded-lg text-xs text-gray-600 border border-indigo-100">
+                                        Q{q.question_number}: {q.overall_score?.toFixed(1) || '?'}/10
+                                      </span>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                              
+                              {/* Top improvements preview */}
+                              {!answer.evaluation.all_questions?.length && answer.evaluation.top_3_improvements && answer.evaluation.top_3_improvements.length > 0 && (
+                                <div className="mt-4 pt-4 border-t border-indigo-100">
+                                  <p className="text-xs uppercase tracking-wide text-indigo-600 mb-2">🎯 Top Priority</p>
+                                  <p className="text-sm text-gray-700">{answer.evaluation.top_3_improvements[0]}</p>
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Full Actionable Evaluation Card */}
+                          {expandedEvaluations.has(answer.id) && (
+                            <>
+                              {/* Multi-question tabs */}
+                              {answer.evaluation.all_questions && answer.evaluation.all_questions.length > 1 && (
+                                <div className="mb-4">
+                                  <div className="flex items-center gap-2 mb-3">
+                                    <AcademicCapIcon className="h-5 h-5 text-indigo-500" />
+                                    <span className="text-sm font-semibold text-gray-700">Select Question to View</span>
+                                  </div>
+                                  <div className="flex flex-wrap gap-2">
+                                    {answer.evaluation.all_questions.map((q, idx) => (
+                                      <button
+                                        key={idx}
+                                        onClick={() => setSelectedQuestions(prev => ({ ...prev, [answer.id]: idx }))}
+                                        className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                                          (selectedQuestions[answer.id] || 0) === idx
+                                            ? 'bg-indigo-600 text-white shadow-md'
+                                            : 'bg-white text-gray-600 border border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'
+                                        }`}
+                                      >
+                                        <div className="flex items-center gap-2">
+                                          <span>Q{q.question_number}</span>
+                                          <span className={`text-xs px-1.5 py-0.5 rounded ${
+                                            (selectedQuestions[answer.id] || 0) === idx
+                                              ? 'bg-indigo-500'
+                                              : 'bg-gray-100'
+                                          }`}>
+                                            {q.overall_score?.toFixed(1) || '?'}/10
+                                          </span>
+                                        </div>
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                              
+                              {/* Display selected question evaluation */}
+                              {answer.evaluation.all_questions && answer.evaluation.all_questions.length > 1 ? (
+                                (() => {
+                                  const selectedIdx = selectedQuestions[answer.id] || 0;
+                                  const selectedQ = answer.evaluation.all_questions[selectedIdx];
+                                  // Create evaluation object from question data
+                                  const questionEval: AnswerEvaluation = {
+                                    ...answer.evaluation,
+                                    detected_subject: selectedQ.detected_subject,
+                                    demand_analysis: selectedQ.demand_analysis,
+                                    structure_analysis: selectedQ.structure,
+                                    content_quality: selectedQ.content_quality,
+                                    examples: selectedQ.examples,
+                                    diagram_suggestion: selectedQ.diagram_suggestion,
+                                    value_additions: selectedQ.value_additions,
+                                    presentation: selectedQ.presentation,
+                                    overall_score: selectedQ.overall_score,
+                                    quick_verdict: selectedQ.quick_verdict,
+                                    top_3_improvements: selectedQ.top_3_improvements,
+                                    dimensional_scores: selectedQ.dimensional_scores,
+                                  };
+                                  return (
+                                    <ActionableEvaluationCard 
+                                      evaluation={questionEval}
+                                      questionNumber={selectedQ.question_number}
+                                      questionText={selectedQ.question_text}
+                                    />
+                                  );
+                                })()
+                              ) : (
+                                <ActionableEvaluationCard 
+                                  evaluation={answer.evaluation}
+                                />
+                              )}
+                            </>
+                          )}
+                        </>
+                      ) : (
+                        /* Fallback to old evaluation display for legacy evaluations */
+                        <>
+                          <div className="bg-gradient-to-r from-blue-50 to-green-50 rounded-lg p-4 mb-4">
+                            <div className="flex items-center justify-between mb-3">
+                              <h4 className="text-lg font-semibold text-gray-900 flex items-center">
+                                <CheckCircleIcon className="h-5 w-5 text-green-500 mr-2" />
+                                Evaluation Complete
+                              </h4>
+                              <button
+                                onClick={() => toggleEvaluationExpanded(answer.id)}
+                                className="inline-flex items-center px-3 py-1 bg-white rounded-full text-sm font-medium text-primary-600 hover:bg-primary-50 transition-colors border border-primary-200"
+                              >
+                                <span>{expandedEvaluations.has(answer.id) ? 'Hide Details' : 'View Details'}</span>
+                                {expandedEvaluations.has(answer.id) ? (
+                                  <ChevronUpIcon className="h-4 w-4 ml-1" />
+                                ) : (
+                                  <ChevronDownIcon className="h-4 w-4 ml-1" />
+                                )}
+                              </button>
+                            </div>
+                            
+                            {/* Score Summary */}
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                              <div className="text-center">
+                                <div className="text-2xl font-bold text-primary-600">
+                                  {Number(answer.evaluation.score).toFixed(1)}/{answer.evaluation.maxScore}
+                                </div>
+                                <div className="text-xs text-gray-600">Total Score</div>
+                              </div>
+                              <div className="text-center">
+                                <div className="text-2xl font-bold text-blue-600">
+                                  {Number(answer.evaluation.structure).toFixed(1)}/10
+                                </div>
+                                <div className="text-xs text-gray-600">Structure</div>
+                              </div>
+                              <div className="text-center">
+                                <div className="text-2xl font-bold text-green-600">
+                                  {Number(answer.evaluation.coverage).toFixed(1)}/10
+                                </div>
+                                <div className="text-xs text-gray-600">Coverage</div>
+                              </div>
+                              <div className="text-center">
+                                <div className="text-2xl font-bold text-purple-600">
+                                  {Number(answer.evaluation.tone).toFixed(1)}/10
+                                </div>
+                                <div className="text-xs text-gray-600">Tone</div>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Expandable Detailed Evaluation (Legacy) */}
+                          {expandedEvaluations.has(answer.id) && (
+                            <div className="space-y-6 animate-in slide-in-from-top duration-300">
+                              {/* Detailed Feedback */}
+                              <div className="bg-white border border-gray-200 rounded-lg p-6">
+                                <h5 className="text-lg font-semibold text-gray-900 mb-4 flex items-center">
+                                  <DocumentTextIcon className="h-5 w-5 text-blue-500 mr-2" />
+                                  📝 Detailed Analysis
+                                </h5>
+                                <div className="prose max-w-none">
+                                  <div className="bg-gray-50 p-4 rounded-lg">
+                                    <div className="text-sm text-gray-700 leading-relaxed prose prose-sm prose-gray max-w-none
+                                        prose-headings:text-gray-900 prose-headings:font-semibold
+                                        prose-p:text-gray-700 prose-p:leading-relaxed
+                                        prose-strong:text-gray-900 prose-strong:font-semibold
+                                        prose-ul:text-gray-700 prose-li:text-gray-700
+                                        prose-code:text-indigo-600 prose-code:bg-indigo-50 prose-code:px-1 prose-code:rounded">
+                                      <ReactMarkdown 
+                                        remarkPlugins={[remarkGfm]}
+                                        components={{
+                                          p: ({children}) => <p className="mb-3 whitespace-pre-wrap">{children}</p>,
+                                          h1: ({children}) => <h1 className="text-lg font-semibold mb-3 mt-4 whitespace-pre-wrap">{children}</h1>,
+                                          h2: ({children}) => <h2 className="text-md font-semibold mb-2 mt-3 whitespace-pre-wrap">{children}</h2>,
+                                          h3: ({children}) => <h3 className="text-sm font-semibold mb-2 mt-3 whitespace-pre-wrap">{children}</h3>,
+                                          strong: ({children}) => <strong className="font-semibold text-gray-900">{children}</strong>,
+                                          ul: ({children}) => <ul className="list-disc pl-6 mb-3 space-y-1">{children}</ul>,
+                                          li: ({children}) => <li className="text-gray-700 whitespace-pre-wrap">{children}</li>,
+                                          br: () => <br />,
+                                        }}
+                                      >
+                                        {answer.evaluation.feedback}
+                                      </ReactMarkdown>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Strengths and Improvements */}
+                              <div className="grid md:grid-cols-2 gap-6">
+                                {Array.isArray(answer.evaluation.strengths) && answer.evaluation.strengths.length > 0 && (
+                                  <div className="bg-green-50 border border-green-200 rounded-lg p-6">
+                                    <h5 className="text-lg font-semibold text-green-800 mb-4 flex items-center">
+                                      <CheckCircleIcon className="h-5 w-5 mr-2" />
+                                      ✅ Strengths Identified
+                                    </h5>
+                                    <ul className="space-y-3">
+                                      {answer.evaluation.strengths.map((strength, index) => (
+                                        <li key={index} className="text-sm text-green-700 flex items-start">
+                                          <span className="text-green-500 mr-3 mt-1">•</span>
+                                          <span className="flex-1">{strength}</span>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
+
+                                {Array.isArray(answer.evaluation.improvements) && answer.evaluation.improvements.length > 0 && (
+                                  <div className="bg-amber-50 border border-amber-200 rounded-lg p-6">
+                                    <h5 className="text-lg font-semibold text-amber-800 mb-4 flex items-center">
+                                      <ExclamationCircleIcon className="h-5 w-5 mr-2" />
+                                      💡 Areas for Improvement
+                                    </h5>
+                                    <ul className="space-y-3">
+                                      {answer.evaluation.improvements.map((improvement, index) => (
+                                        <li key={index} className="text-sm text-amber-700 flex items-start">
+                                          <span className="text-amber-500 mr-3 mt-1">•</span>
+                                          <span className="flex-1">{improvement}</span>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  ) : (answer.filePath && answer.filePath.endsWith('.pdf') && !answer.evaluation) ? (
+                    <div className="mt-6 pt-6 border-t border-gray-200">
+                      {/* Evaluation Options for PDF uploads */}
+                      <div className="bg-gradient-to-r from-blue-50 to-purple-50 border border-blue-200 rounded-lg p-6">
+                        <div className="text-center mb-6">
+                          <h4 className="text-xl font-semibold text-gray-900 mb-2">Choose Your Evaluation Type</h4>
+                          <p className="text-sm text-gray-600">Select how you'd like your answer to be evaluated</p>
                         </div>
                         
-                        {/* Score Summary */}
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                          <div className="text-center">
-                            <div className="text-2xl font-bold text-primary-600">
-                              {Number(answer.evaluation.score).toFixed(1)}/{answer.evaluation.maxScore}
+                        <div className="grid md:grid-cols-2 gap-4">
+                          {/* 13-Dimensional AI Analysis */}
+                          <div className="bg-white border-2 border-blue-200 rounded-lg p-6 hover:border-blue-400 transition-colors cursor-pointer"
+                               onClick={() => handleStartEvaluation(answer.id, 'dimensional')}>
+                            <div className="text-center">
+                              <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                                <svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                                </svg>
+                              </div>
+                              <h5 className="text-lg font-semibold text-gray-900 mb-2">13-Dimensional AI Analysis</h5>
+                              <p className="text-sm text-gray-600 mb-4">Comprehensive AI evaluation across 13 key dimensions including structure, coverage, tone, and more</p>
+                              <div className="space-y-2 text-xs text-gray-500">
+                                <div className="flex items-center justify-center">
+                                  <CheckCircleIcon className="h-4 w-4 text-green-500 mr-1" />
+                                  <span>Detailed dimensional scoring</span>
+                                </div>
+                                <div className="flex items-center justify-center">
+                                  <CheckCircleIcon className="h-4 w-4 text-green-500 mr-1" />
+                                  <span>AI-powered feedback</span>
+                                </div>
+                                <div className="flex items-center justify-center">
+                                  <CheckCircleIcon className="h-4 w-4 text-green-500 mr-1" />
+                                  <span>Comprehensive analysis</span>
+                                </div>
+                                <div className="flex items-center justify-center">
+                                  <ClockIcon className="h-4 w-4 text-blue-500 mr-1" />
+                                  <span>2-3 minutes</span>
+                                </div>
+                              </div>
+                              <button className="mt-4 w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 transition-colors">
+                                Start AI Analysis
+                              </button>
                             </div>
-                            <div className="text-xs text-gray-600">Total Score</div>
                           </div>
-                          <div className="text-center">
-                            <div className="text-2xl font-bold text-blue-600">
-                              {Number(answer.evaluation.structure).toFixed(1)}/10
+
+                          {/* Topper Comparison */}
+                          <div className="bg-white border-2 border-purple-200 rounded-lg p-6 hover:border-purple-400 transition-colors cursor-pointer"
+                               onClick={() => handleStartEvaluation(answer.id, 'topper-comparison')}>
+                            <div className="text-center">
+                              <div className="w-12 h-12 bg-purple-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                                <svg className="w-6 h-6 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+                                </svg>
+                              </div>
+                              <h5 className="text-lg font-semibold text-gray-900 mb-2">Compare with Toppers</h5>
+                              <p className="text-sm text-gray-600 mb-4">Compare your answer with high-scoring topper answers using semantic similarity</p>
+                              <div className="space-y-2 text-xs text-gray-500">
+                                <div className="flex items-center justify-center">
+                                  <CheckCircleIcon className="h-4 w-4 text-green-500 mr-1" />
+                                  <span>Topper answer comparison</span>
+                                </div>
+                                <div className="flex items-center justify-center">
+                                  <CheckCircleIcon className="h-4 w-4 text-green-500 mr-1" />
+                                  <span>Semantic similarity analysis</span>
+                                </div>
+                                <div className="flex items-center justify-center">
+                                  <CheckCircleIcon className="h-4 w-4 text-green-500 mr-1" />
+                                  <span>Gap analysis</span>
+                                </div>
+                                <div className="flex items-center justify-center">
+                                  <ClockIcon className="h-4 w-4 text-purple-500 mr-1" />
+                                  <span>1-2 minutes</span>
+                                </div>
+                              </div>
+                              <button className="mt-4 w-full bg-purple-600 text-white py-2 px-4 rounded-md hover:bg-purple-700 transition-colors">
+                                Compare with Toppers
+                              </button>
                             </div>
-                            <div className="text-xs text-gray-600">Structure</div>
-                          </div>
-                          <div className="text-center">
-                            <div className="text-2xl font-bold text-green-600">
-                              {Number(answer.evaluation.coverage).toFixed(1)}/10
-                            </div>
-                            <div className="text-xs text-gray-600">Coverage</div>
-                          </div>
-                          <div className="text-center">
-                            <div className="text-2xl font-bold text-purple-600">
-                              {Number(answer.evaluation.tone).toFixed(1)}/10
-                            </div>
-                            <div className="text-xs text-gray-600">Tone</div>
                           </div>
                         </div>
                       </div>
-
-                      {/* Expandable Detailed Evaluation */}
-                      {expandedEvaluations.has(answer.id) && (
-                        <div className="space-y-6 animate-in slide-in-from-top duration-300">
-                          {/* Detailed Feedback */}
-                          <div className="bg-white border border-gray-200 rounded-lg p-6">
-                            <h5 className="text-lg font-semibold text-gray-900 mb-4 flex items-center">
-                              <DocumentTextIcon className="h-5 w-5 text-blue-500 mr-2" />
-                              � Detailed Analysis
-                            </h5>
-                            <div className="prose max-w-none">
-                              <div className="bg-gray-50 p-4 rounded-lg">
-                                <div className="text-sm text-gray-700 leading-relaxed prose prose-sm prose-gray max-w-none
-                                    prose-headings:text-gray-900 prose-headings:font-semibold
-                                    prose-p:text-gray-700 prose-p:leading-relaxed
-                                    prose-strong:text-gray-900 prose-strong:font-semibold
-                                    prose-ul:text-gray-700 prose-li:text-gray-700
-                                    prose-code:text-indigo-600 prose-code:bg-indigo-50 prose-code:px-1 prose-code:rounded">
-                                  <ReactMarkdown 
-                                    remarkPlugins={[remarkGfm]}
-                                    components={{
-                                      // Ensure proper line breaks and spacing with white-space preservation
-                                      p: ({children}) => <p className="mb-3 whitespace-pre-wrap">{children}</p>,
-                                      h1: ({children}) => <h1 className="text-lg font-semibold mb-3 mt-4 whitespace-pre-wrap">{children}</h1>,
-                                      h2: ({children}) => <h2 className="text-md font-semibold mb-2 mt-3 whitespace-pre-wrap">{children}</h2>,
-                                      h3: ({children}) => <h3 className="text-sm font-semibold mb-2 mt-3 whitespace-pre-wrap">{children}</h3>,
-                                      strong: ({children}) => <strong className="font-semibold text-gray-900">{children}</strong>,
-                                      ul: ({children}) => <ul className="list-disc pl-6 mb-3 space-y-1">{children}</ul>,
-                                      li: ({children}) => <li className="text-gray-700 whitespace-pre-wrap">{children}</li>,
-                                      br: () => <br />,
-                                      text: ({children}) => <span className="whitespace-pre-wrap">{children}</span>,
-                                    }}
-                                  >
-                                    {answer.evaluation.feedback}
-                                  </ReactMarkdown>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-
-                          {/* Strengths and Improvements */}
-                          <div className="grid md:grid-cols-2 gap-6">
-                            {/* Strengths */}
-                            {Array.isArray(answer.evaluation.strengths) && answer.evaluation.strengths.length > 0 && (
-                              <div className="bg-green-50 border border-green-200 rounded-lg p-6">
-                                <h5 className="text-lg font-semibold text-green-800 mb-4 flex items-center">
-                                  <CheckCircleIcon className="h-5 w-5 mr-2" />
-                                  ✅ Strengths Identified
-                                </h5>
-                                <ul className="space-y-3">
-                                  {answer.evaluation.strengths.map((strength, index) => (
-                                    <li key={index} className="text-sm text-green-700 flex items-start">
-                                      <span className="text-green-500 mr-3 mt-1">•</span>
-                                      <span className="flex-1">{strength}</span>
-                                    </li>
-                                  ))}
-                                </ul>
-                              </div>
-                            )}
-
-                            {/* Areas for Improvement */}
-                            {Array.isArray(answer.evaluation.improvements) && answer.evaluation.improvements.length > 0 && (
-                              <div className="bg-amber-50 border border-amber-200 rounded-lg p-6">
-                                <h5 className="text-lg font-semibold text-amber-800 mb-4 flex items-center">
-                                  <ExclamationCircleIcon className="h-5 w-5 mr-2" />
-                                  💡 Areas for Improvement
-                                </h5>
-                                <ul className="space-y-3">
-                                  {answer.evaluation.improvements.map((improvement, index) => (
-                                    <li key={index} className="text-sm text-amber-700 flex items-start">
-                                      <span className="text-amber-500 mr-3 mt-1">•</span>
-                                      <span className="flex-1">{improvement}</span>
-                                    </li>
-                                  ))}
-                                </ul>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      )}
                     </div>
                   ) : (
                     <div className="mt-6 pt-6 border-t border-gray-200">

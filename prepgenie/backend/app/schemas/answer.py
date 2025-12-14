@@ -27,6 +27,7 @@ class AnswerEvaluationBase(BaseModel):
     structure: float = 0.0
     coverage: float = 0.0
     tone: float = 0.0
+    actionable_data: Optional[str] = None  # JSON string with full actionable evaluation
 
 
 class AnswerEvaluationCreate(AnswerEvaluationBase):
@@ -42,6 +43,7 @@ class AnswerEvaluationUpdate(BaseModel):
     structure: Optional[float] = None
     coverage: Optional[float] = None
     tone: Optional[float] = None
+    actionable_data: Optional[str] = None
 
 
 class AnswerEvaluation(AnswerEvaluationBase):
@@ -51,6 +53,7 @@ class AnswerEvaluation(AnswerEvaluationBase):
     # These match the database schema (JSON strings)
     strengths: Optional[str] = None
     improvements: Optional[str] = None
+    actionable_data: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -142,3 +145,16 @@ class AnswerUploadResponse(BaseModel):
     answer: AnswerResponse
     task_id: Optional[str] = None
     processing_started: Optional[bool] = False
+
+
+class EvaluationOption(BaseModel):
+    """Evaluation option for dual evaluation system"""
+    type: str = Field(..., description="Type of evaluation: 'dimensional' or 'topper_comparison'")
+    name: str = Field(..., description="Display name for the evaluation option")
+    description: str = Field(..., description="Description of what this evaluation provides")
+
+
+class EvaluationRequest(BaseModel):
+    """Request model for evaluation with option selection"""
+    evaluation_type: str = Field(default="dimensional", description="Type of evaluation to perform")
+    include_topper_comparison: Optional[bool] = Field(default=False, description="Whether to include topper comparison")

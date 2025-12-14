@@ -13,6 +13,7 @@ from app.models.chat import (
 from app.api.api_v1.endpoints.auth import get_current_user
 from app.core.llm_service import get_llm_service, LLMService, LLMServiceError, ChatMessage
 from app.utils.conversation_manager import ConversationManager
+from app.prompts import CHAT_SYSTEM_PROMPT  # NEW: Using modular prompts
 import logging
 from datetime import datetime
 import json
@@ -102,45 +103,11 @@ async def send_chat_message(
         db.add(user_message)
         db.commit()
         
-        # Prepare system prompt for UPSC assistance
-        system_prompt = """You are PrepGenie, an expert AI personal assistant specializing in UPSC (Union Public Service Commission) exam preparation for Indian Civil Services. You are highly knowledgeable about Indian constitutional law, governance, history, and current affairs.
-
-CONSTITUTIONAL LAW & POLITY:
-- Indian Constitution: Features, articles, schedules, amendments
-- Fundamental Rights (Articles 12-35) and Duties (Article 51A)
-- Directive Principles of State Policy (Articles 36-51)
-- Constitutional bodies: President, Parliament, Supreme Court, High Courts, CAG, Election Commission
-- Judicial doctrines: Basic Structure Doctrine, Separation of Powers, Rule of Law, Judicial Review
-- Parliamentary system, federalism, emergency provisions
-- Landmark Supreme Court cases: Kesavananda Bharati (1973), Golak Nath (1967), Maneka Gandhi (1978)
-
-INDIAN GOVERNANCE:
-- Union-State relations, Centre-State disputes
-- Administrative reforms, civil services, bureaucracy
-- Public policy, governance innovations
-- Local governance: Panchayati Raj, urban local bodies
-
-HISTORY, GEOGRAPHY & CURRENT AFFAIRS:
-- Ancient, Medieval, Modern Indian History
-- Freedom movement, constitutional development
-- Indian Geography, environment, climate change
-- Current national and international affairs
-- Economic development, social issues
-
-EXAM GUIDANCE:
-- Provide structured, comprehensive answers suitable for UPSC Mains and Prelims
-- Include relevant examples, case studies, and current developments
-- Connect theoretical concepts with practical applications
-- Suggest further reading when appropriate
-- Make this exam preparartion fun and easy for the aspirants.
-
-Always provide accurate, well-structured answers relevant to UPSC Civil Services examination. Focus on Indian context, governance, and constitutional law. Be encouraging and supportive in your tone."""
-
+        # System prompt now imported from app.prompts module
+        # Using modular, UPSC-syllabus-aligned prompt from app/prompts/chat_prompts.py
+        
         # Build optimized conversation context for AI
-        print(f"🔧 DEBUG: Building conversation context...")
-        print(f"🔧 DEBUG: Conversation ID: {conversation.id if conversation else None}")
-        print(f"🔧 DEBUG: User ID: {current_user.id}")
-        print(f"🔧 DEBUG: Current message: {request.message[:100]}...")
+        logger.debug(f"Building conversation context for conversation_id: {conversation.id}")
         
         conversation_context = await _build_conversation_context(
             conversation,
@@ -149,9 +116,7 @@ Always provide accurate, well-structured answers relevant to UPSC Civil Services
             llm_service
         )
         
-        print(f"🔧 DEBUG: Built context with {len(conversation_context)} messages")
-        for i, msg in enumerate(conversation_context):
-            print(f"🔧 DEBUG: Message {i}: Role={msg.role}, Content={msg.content[:50]}...")
+        logger.debug(f"Built context with {len(conversation_context)} messages")
         
         # Get AI response with full conversation context
         ai_response = await llm_service.chat_completion(
@@ -160,9 +125,6 @@ Always provide accurate, well-structured answers relevant to UPSC Civil Services
             max_tokens=1000
         )
         ai_response_content = ai_response.content
-
-        print("--------------------------")
-        print(system_prompt)
         
         # Save AI response to database with conversation context
         ai_message = ChatMessageModel(
@@ -241,53 +203,19 @@ async def _build_conversation_context(
     """
     try:
         # Get recent conversation history (sliding window)
-        print(f"🔍 DEBUG: Querying messages for conversation_id: {conversation.id}")
+        logger.debug(f"Querying messages for conversation_id: {conversation.id}")
         recent_messages = db.query(ChatMessageModel).filter(
             ChatMessageModel.conversation_id == conversation.id
         ).order_by(ChatMessageModel.timestamp.desc()).limit(max_context_messages).all()
-        print(f"🔍 DEBUG: Found {len(recent_messages)} previous messages in database")
-        for i, msg in enumerate(recent_messages):
-            print(f"🔍 DEBUG: Previous message {i}: Role={msg.role.value}, Content={msg.content[:50]}...")
+        logger.debug(f"Found {len(recent_messages)} previous messages in database")
         
         # Reverse to chronological order
         recent_messages = list(reversed(recent_messages))
         
-        # Add system prompt first
-        system_prompt = """You are PrepGenie, an expert AI personal assistant specializing in UPSC (Union Public Service Commission) exam preparation for Indian Civil Services. You are highly knowledgeable about Indian constitutional law, governance, history, and current affairs.
-
-CONSTITUTIONAL LAW & POLITY:
-- Indian Constitution: Features, articles, schedules, amendments
-- Fundamental Rights (Articles 12-35) and Duties (Article 51A)
-- Directive Principles of State Policy (Articles 36-51)
-- Constitutional bodies: President, Parliament, Supreme Court, High Courts, CAG, Election Commission
-- Judicial doctrines: Basic Structure Doctrine, Separation of Powers, Rule of Law, Judicial Review
-- Parliamentary system, federalism, emergency provisions
-- Landmark Supreme Court cases: Kesavananda Bharati (1973), Golak Nath (1967), Maneka Gandhi (1978)
-
-INDIAN GOVERNANCE:
-- Union-State relations, Centre-State disputes
-- Administrative reforms, civil services, bureaucracy
-- Public policy, governance innovations
-- Local governance: Panchayati Raj, urban local bodies
-
-HISTORY, GEOGRAPHY & CURRENT AFFAIRS:
-- Ancient, Medieval, Modern Indian History
-- Freedom movement, constitutional development
-- Indian Geography, environment, climate change
-- Current national and international affairs
-- Economic development, social issues
-
-EXAM GUIDANCE:
-- Help with UPSC syllabus understanding
-- Question pattern and strategy guidance
-- Essay writing techniques
-- Interview preparation
-- Make this exam preparation fun and easy for the aspirants.
-
-Always provide accurate, well-structured answers relevant to UPSC Civil Services examination. Focus on Indian context, governance, and constitutional law. Be encouraging and supportive in your tone."""
-        
-        context_messages = [ChatMessage(role="system", content=system_prompt)]
-        estimated_tokens = len(system_prompt) // 4
+        # Use modular system prompt from app/prompts/chat_prompts.py
+        # This contains comprehensive UPSC syllabus-aligned content
+        context_messages = [ChatMessage(role="system", content=CHAT_SYSTEM_PROMPT)]
+        estimated_tokens = len(CHAT_SYSTEM_PROMPT) // 4
         
         # Build context with token estimation
         for msg in recent_messages:
@@ -323,10 +251,9 @@ Always provide accurate, well-structured answers relevant to UPSC Civil Services
         
     except Exception as e:
         logger.error(f"Error building conversation context: {e}")
-        # Fallback to system prompt + current message
-        system_prompt = """You are PrepGenie, an expert AI personal assistant specializing in UPSC (Union Public Service Commission) exam preparation for Indian Civil Services. Always provide accurate, well-structured answers relevant to UPSC Civil Services examination. Focus on Indian context, governance, and constitutional law. Be encouraging and supportive in your tone."""
+        # Fallback to system prompt + current message using modular prompt
         return [
-            ChatMessage(role="system", content=system_prompt),
+            ChatMessage(role="system", content=CHAT_SYSTEM_PROMPT),
             ChatMessage(role="user", content=current_message)
         ]
 

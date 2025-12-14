@@ -108,14 +108,11 @@ class ProgressTracker:
         
         message = self._format_message(phase, current_page, current_question, details, remaining)
         
-        # Log progress
+        # Log progress (production level)
         logger.info(f"Progress: {progress}% - {message}")
         
         # Call callback if provided (handle both sync and async callbacks)
         if self.callback:
-            print(f"🔧 DEBUG: ProgressTracker callback found, preparing to call it")
-            logger.info(f"🔧 DEBUG: ProgressTracker callback found, preparing to call it")
-            
             callback_data = {
                 "phase": phase,
                 "progress": progress,
@@ -128,28 +125,15 @@ class ProgressTracker:
                 "details": details
             }
             
-            print(f"⚡ DEBUG: About to call callback with data: {callback_data}")
-            logger.info(f"⚡ DEBUG: About to call callback with data: {callback_data}")
-            
             # Check if callback is async or sync
             import asyncio
             try:
                 if asyncio.iscoroutinefunction(self.callback):
-                    print(f"🔄 DEBUG: Calling ASYNC callback")
                     await self.callback(callback_data)
-                    print(f"✅ DEBUG: ASYNC callback completed successfully")
                 else:
-                    print(f"🔄 DEBUG: Calling SYNC callback")
                     self.callback(callback_data)
-                    print(f"✅ DEBUG: SYNC callback completed successfully")
             except Exception as callback_error:
-                print(f"💥 DEBUG: Callback execution failed: {callback_error}")
-                logger.error(f"💥 DEBUG: Callback execution failed: {callback_error}")
-                import traceback
-                traceback.print_exc()
-        else:
-            print(f"❌ DEBUG: No callback provided to ProgressTracker!")
-            logger.warning(f"❌ DEBUG: No callback provided to ProgressTracker!")
+                logger.error(f"Callback execution failed: {callback_error}")
     
     def _format_message(self, phase: str, current_page: int, current_question: int, 
                        details: str, remaining_minutes: int) -> str:
@@ -194,18 +178,20 @@ class VisionPDFProcessor:
     Integrated with 13-dimensional evaluation system with progress tracking
     """
     
-    def __init__(self, progress_callback=None, llm_service=None):
-        print(f"DEBUG: VisionPDFProcessor.__init__ called with args: progress_callback={progress_callback}, llm_service={llm_service}")
-        print(f"DEBUG: Arguments received in __init__: {locals()}")
-        # Ignore llm_service parameter for compatibility - we get our own
+    def __init__(self, progress_callback=None, llm_service=None, paper_subject: str = None):
+        # Initialize with LLM service (we get our own for consistency)
         self.llm_service = get_llm_service()
         self.extracted_questions = []
         self.extracted_answers = []
         self.evaluation_results = []
         self.progress_callback = progress_callback
+        self.paper_subject = paper_subject  # Store paper-level subject for consistent evaluation
         self.total_pages = 0
         self.current_page = 0
         self.processing_start_time = None
+        
+        if paper_subject:
+            logger.info(f"📋 VisionPDFProcessor initialized with paper-level subject: {paper_subject.upper()}")
     
     async def log_progress(self, message: str, progress_type: str = "info", details: dict = None):
         """Log progress with structured information for UI and logs"""
@@ -397,13 +383,22 @@ You are analyzing a **HANDWRITTEN UPSC Civil Services Mains exam answer booklet*
 2. **Visual Integration**: Describe ALL visual elements as part of answer text for complete evaluation  
 3. **UPSC Specificity**: Extract exact policy names, constitutional articles, scheme details, current affairs
 4. **Continuation Handling**: For answers without question numbers, analyze content topic and intelligently link
-5. **Complete Extraction**: Extract ALL readable handwritten content - missing content impacts evaluation
+5. **MULTI-PAGE DETECTION**: Look for incomplete sentences, abrupt endings, or "(continued)" markers that indicate answer continues on next page
+6. **COMPLETE TEXT EXTRACTION**: Extract ALL handwritten text, even if it appears to be continuation from previous page
+
+**CRITICAL: MULTI-PAGE ANSWER DETECTION**:
+- UPSC answers often span 2-3 pages (10 marks = 2 pages, 15 marks = 3 pages)
+- Look for answers that end mid-sentence or without proper conclusion
+- Check if handwriting continues at page bottom without clear ending
+- Mark "is_continuation": true for answer parts that continue previous content
+- For continuation pages: analyze content topic to link to correct question number
 
 **SPECIAL INSTRUCTIONS FOR CONTINUATION PAGES**:
 - If answer text exists but no question number visible, examine the content closely
 - Look for policy continuity, constitutional themes, or topic consistency with previous pages
 - Make intelligent linking based on subject matter (e.g., Article 356 content → governance question)
-- Populate "linked_to_question" with your best analysis-based guess"""
+- Populate "linked_to_question" with your best analysis-based guess
+- Extract COMPLETE text even if it starts mid-sentence (continuation from previous page)"""
 
         try:
             # Create message for vision API
@@ -463,6 +458,9 @@ You are analyzing a **HANDWRITTEN UPSC Civil Services Mains exam answer booklet*
     def match_questions_to_answers(self, all_analyses: List[Dict]) -> List[Dict]:
         """Enhanced question-answer matching with improved continuation handling"""
         
+        # Log summary of pages being processed
+        logger.info(f"🔍 Matching questions to answers across {len(all_analyses)} pages")
+        
         # Collect all questions and answers
         questions = {}
         answers = {}
@@ -510,22 +508,41 @@ You are analyzing a **HANDWRITTEN UPSC Civil Services Mains exam answer booklet*
                 
                 # Case 2: Answer without question number (continuation) - Enhanced Intelligent Linking
                 else:
-                    linked_question = a.get("linked_to_question")
+                    vision_linked = a.get("linked_to_question")
+                    linked_question = None  # Start fresh, don't trust Vision LLM blindly
                     
-                    # Enhanced Strategy 1: Use previous page question (most common pattern)
-                    if not linked_question and page_num - 1 in last_question_on_page:
+                    # CRITICAL FIX: ALWAYS prefer current_question_context over Vision LLM's guess
+                    # The Vision LLM often makes wrong guesses about which question a continuation belongs to
+                    # The most reliable strategy is: continuation pages belong to the most recently seen question
+                    
+                    if current_question_context:
+                        # Use the most recent question context (most reliable for continuations)
+                        linked_question = current_question_context
+                        
+                        # Log if Vision LLM had a different opinion
+                        if vision_linked and vision_linked != current_question_context:
+                            logger.warning(f"⚠️ Page {page_num}: Vision LLM suggested Q{vision_linked}, but using Q{current_question_context} (most recent question)")
+                        else:
+                            logger.info(f"   → Page {page_num}: Linked to Q{linked_question} (current question context)")
+                        
+                        a["continuation_context"] = "Current question context (most recent)"
+                    
+                    # Strategy 2: Use previous page question
+                    elif not linked_question and page_num - 1 in last_question_on_page:
                         linked_question = last_question_on_page[page_num - 1]
                         a["continuation_context"] = "Previous page question"
+                        logger.info(f"   → Page {page_num}: Linked to Q{linked_question} (previous page)")
                     
-                    # Enhanced Strategy 2: Look for nearest previous question within reasonable range
+                    # Strategy 3: Look for nearest previous question within reasonable range
                     elif not linked_question:
                         for offset in range(2, 6):  # Check up to 5 pages back
                             if page_num - offset in last_question_on_page:
                                 linked_question = last_question_on_page[page_num - offset]
                                 a["continuation_context"] = f"Nearest question {offset} pages back"
+                                logger.info(f"   → Page {page_num}: Linked to Q{linked_question} ({offset} pages back)")
                                 break
                     
-                    # Strategy 3: Content-based intelligent linking
+                    # Strategy 4: Content-based intelligent linking (fallback)
                     if not linked_question:
                         answer_text = a.get("answer_text", "").lower()
                         
@@ -547,15 +564,11 @@ You are analyzing a **HANDWRITTEN UPSC Civil Services Mains exam answer booklet*
                                 a["continuation_context"] = "Content-based judiciary linking"
                                 break
                     
-                    # Strategy 4: Use current question context
-                    if not linked_question and current_question_context:
-                        linked_question = current_question_context
-                        a["continuation_context"] = "Current question context"
-                    
-                    # Strategy 5: Use most recent question (fallback)
+                    # Strategy 5: Use most recent question (last resort fallback)
                     if not linked_question and questions:
                         linked_question = max(questions.keys())
                         a["continuation_context"] = "Most recent question fallback"
+                        logger.info(f"   → Page {page_num}: Linked to Q{linked_question} (fallback - most recent)")
                     
                     if linked_question:
                         if linked_question not in answers:
@@ -717,10 +730,36 @@ You are analyzing a **HANDWRITTEN UPSC Civil Services Mains exam answer booklet*
                 ]
             })
         
-        # Log linking summary for debugging
-        logger.info(f"Question-Answer Linking Summary:")
+        # Log detailed linking summary for debugging multi-page answers
+        logger.info(f"📊 Question-Answer Linking Summary:")
         for qa in matched_qa:
-            logger.info(f"Q{qa['question_number']}: {qa['answer_span_pages']} pages, {len(qa['visual_elements'])} visual elements")
+            answer_length = len(qa['student_answer'])
+            pages_info = qa['source_pages']['answers']
+            marks = qa.get('marks') or 10
+            expected_pages = 2 if marks == 10 else (3 if marks == 15 else (4 if marks == 20 else 2))
+            logger.info(f"📝 Q{qa['question_number']}: {qa['answer_span_pages']} pages, {answer_length} chars, {marks} marks")
+            
+            # Warn if pages don't match expected
+            if qa['answer_span_pages'] < expected_pages:
+                logger.warning(f"⚠️ Q{qa['question_number']}: Only {qa['answer_span_pages']} pages extracted, expected ~{expected_pages} for {marks} marks!")
+                
+                # Check if answer seems complete based on length and marks
+                marks = qa.get('marks') or 10  # Default to 10 if marks is None
+                expected_words = marks * 15  # Rough estimate: 15 words per mark
+                actual_words = len(qa['student_answer'].split())
+                completeness_ratio = actual_words / expected_words if expected_words > 0 else 0
+                
+                if completeness_ratio < 0.5:
+                    logger.warning(f"⚠️ Q{qa['question_number']} may be incomplete: {actual_words} words vs expected ~{expected_words} words (ratio: {completeness_ratio:.2f})")
+                else:
+                    logger.info(f"✅ Q{qa['question_number']} appears complete: {actual_words} words (ratio: {completeness_ratio:.2f})")
+            else:
+                # Single page answer - check if it might be incomplete
+                marks = qa.get('marks') or 10  # Default to 10 if marks is None
+                expected_words = marks * 15
+                actual_words = len(qa['student_answer'].split())
+                if marks >= 10 and actual_words < expected_words * 0.3:
+                    logger.warning(f"⚠️ Q{qa['question_number']} ({marks} marks) on single page may be incomplete: only {actual_words} words")
         
         return matched_qa
     
@@ -995,7 +1034,9 @@ You are analyzing a **HANDWRITTEN UPSC Civil Services Mains exam answer booklet*
                         "word_limit": word_limit,
                         "exam_type": "UPSC Mains"
                     },
-                    llm_service=self.llm_service
+                    llm_service=self.llm_service,
+                    evaluation_type="dimensional",  # Use pure 13D analysis without topper comparison
+                    paper_subject=self.paper_subject  # Pass paper-level subject for consistent evaluation
                 )
                 
                 # Store result
@@ -1054,31 +1095,29 @@ You are analyzing a **HANDWRITTEN UPSC Civil Services Mains exam answer booklet*
         Create comprehensive 13-dimensional evaluation for each extracted question-answer pair
         """
         logger.info("Starting 13-dimensional evaluation process")
-        logger.info(f"DEBUG: qa_data keys: {list(qa_data.keys()) if qa_data else 'None'}")
         
         # Handle different data structures - check for questions key first
         questions_list = None
         if qa_data and 'questions' in qa_data:
             questions_list = qa_data['questions']
-            logger.info(f"DEBUG: Found {len(questions_list)} questions to evaluate")
+            logger.info(f"Found {len(questions_list)} questions to evaluate")
         elif qa_data and isinstance(qa_data, dict):
             # Check if qa_data itself contains question data directly
             if any(key in qa_data for key in ['question_text', 'student_answer', 'question_number']):
                 # Single question format
                 questions_list = [qa_data]
-                logger.info(f"DEBUG: Single question format detected")
             elif 'evaluation_results' in qa_data:
                 # Extract from evaluation_results structure
                 questions_list = []
                 for eval_result in qa_data.get('evaluation_results', []):
                     if 'question_data' in eval_result:
                         questions_list.append(eval_result['question_data'])
-                logger.info(f"DEBUG: Extracted {len(questions_list)} questions from evaluation_results")
+                logger.info(f"Extracted {len(questions_list)} questions from evaluation_results")
             else:
-                logger.error(f"DEBUG: Unrecognized data structure. Available keys: {list(qa_data.keys())}")
+                logger.error(f"Unrecognized data structure. Keys: {list(qa_data.keys())}")
         
         if not questions_list:
-            logger.error(f"DEBUG: No questions found in any expected format")
+            logger.error("No questions found in expected format")
             return {
                 "pdf_filename": qa_data.get("pdf_filename", "unknown"),
                 "total_questions_evaluated": 0,
@@ -1137,7 +1176,9 @@ You are analyzing a **HANDWRITTEN UPSC Civil Services Mains exam answer booklet*
                         "exam_type": "UPSC Mains"
                     },
                     llm_service=self.llm_service,
-                    question_number=question_num  # Pass question number for better logging
+                    question_number=question_num,  # Pass question number for better logging
+                    evaluation_type="dimensional",  # Use pure 13D analysis without topper comparison
+                    paper_subject=self.paper_subject  # Pass paper-level subject for consistent evaluation
                 )
                 
                 # Step 2: Detailed Answer Evaluation
@@ -1241,35 +1282,28 @@ You are analyzing a **HANDWRITTEN UPSC Civil Services Mains exam answer booklet*
         return evaluation_summary
 
 
-async def process_vision_pdf_with_evaluation(file_path: str, db: Session, answer_id: int, progress_callback=None) -> Dict:
+async def process_vision_pdf_with_evaluation(file_path: str, db: Session, answer_id: int, progress_callback=None, paper_subject: str = None) -> Dict:
     """
     Complete end-to-end processing: Vision extraction + 13-dimensional evaluation
+    
+    Args:
+        file_path: Path to the PDF file
+        db: Database session
+        answer_id: ID of the answer
+        progress_callback: Optional callback for progress updates
+        paper_subject: Optional paper-level subject (gs1, gs2, gs3, gs4, anthropology).
+                      If provided, all questions use this subject's evaluation rubric.
     """
-    logger.info(f"DEBUG: process_vision_pdf_with_evaluation called with file_path={file_path}, answer_id={answer_id}")
+    logger.info(f"📄 Processing PDF for evaluation: answer_id={answer_id}, paper_subject={paper_subject or 'auto-detect'}")
     
-    processor = VisionPDFProcessor(progress_callback=progress_callback)
+    processor = VisionPDFProcessor(progress_callback=progress_callback, paper_subject=paper_subject)
     
-    # Step 1: Extract questions and answers using vision (this already includes evaluation)
-    logger.info("DEBUG: Starting vision extraction...")
+    # Step 1: Extract questions and answers using vision
     qa_data = await processor.process_pdf_with_vision(file_path)
     
-    logger.info(f"DEBUG: Vision extraction complete. Data structure:")
-    logger.info(f"DEBUG: qa_data type: {type(qa_data)}")
-    logger.info(f"DEBUG: qa_data keys: {list(qa_data.keys()) if qa_data else 'None'}")
-    
-    # Debug evaluation_results specifically
-    if qa_data and 'evaluation_results' in qa_data:
-        eval_results = qa_data['evaluation_results']
-        logger.info(f"DEBUG: evaluation_results type: {type(eval_results)}")
-        logger.info(f"DEBUG: evaluation_results length: {len(eval_results) if eval_results else 'None/0'}")
-        if eval_results:
-            logger.info(f"DEBUG: First evaluation result keys: {list(eval_results[0].keys()) if eval_results[0] else 'None'}")
-    else:
-        logger.info("DEBUG: No 'evaluation_results' key found in qa_data")
-    
-    # Check if we already have evaluation results from process_pdf_with_vision
+    # Check if we already have evaluation results from vision processing
     if qa_data and 'evaluation_results' in qa_data and qa_data['evaluation_results']:
-        logger.info(f"DEBUG: Found {len(qa_data['evaluation_results'])} existing evaluation results from vision processing")
+        logger.info(f"✅ Found {len(qa_data['evaluation_results'])} evaluation results from vision processing")
         
         # Convert the existing evaluation results to the expected format
         question_evaluations = []
@@ -1357,58 +1391,19 @@ async def process_vision_pdf_with_evaluation(file_path: str, db: Session, answer
             "extraction_metadata": qa_data
         }
         
-        logger.info(f"DEBUG: Converted evaluation results - {len(question_evaluations)} question evaluations created")
-        
-        # Debug: Log the final structure before returning
-        logger.info(f"DEBUG: FINAL RETURN - evaluation_summary type: {type(evaluation_summary)}")
-        logger.info(f"DEBUG: FINAL RETURN - evaluation_summary keys: {list(evaluation_summary.keys())}")
-        logger.info(f"DEBUG: FINAL RETURN - question_evaluations count: {len(evaluation_summary.get('question_evaluations', []))}")
-        
-        # CRITICAL DEBUG: Check if question_evaluations key exists and has data
-        if 'question_evaluations' in evaluation_summary:
-            logger.info(f"DEBUG: ✅ question_evaluations key EXISTS with {len(evaluation_summary['question_evaluations'])} items")
-            
-            # Log the structure of the first question evaluation
-            if evaluation_summary['question_evaluations']:
-                first_qeval = evaluation_summary['question_evaluations'][0]
-                logger.info(f"DEBUG: First question_evaluation keys: {list(first_qeval.keys()) if isinstance(first_qeval, dict) else 'Not a dict'}")
-                
-                # Log the complete evaluation_summary for debugging
-                logger.info(f"DEBUG: 🎯 COMPLETE RETURN DATA:")
-                logger.info(f"DEBUG: pdf_filename: {evaluation_summary.get('pdf_filename')}")
-                logger.info(f"DEBUG: total_questions_evaluated: {evaluation_summary.get('total_questions_evaluated')}")
-                logger.info(f"DEBUG: total_score: {evaluation_summary.get('total_score')}")
-                logger.info(f"DEBUG: score_percentage: {evaluation_summary.get('score_percentage')}")
-                logger.info(f"DEBUG: evaluation_method: {evaluation_summary.get('evaluation_method')}")
-                logger.info(f"DEBUG: question_evaluations length: {len(evaluation_summary.get('question_evaluations', []))}")
-                
-        else:
-            logger.error(f"DEBUG: ❌ question_evaluations key is MISSING from evaluation_summary!")
-            logger.error(f"DEBUG: Available keys: {list(evaluation_summary.keys())}")
+        logger.info(f"✅ Evaluation complete: {len(question_evaluations)} questions, score: {total_score}/{total_max_score}")
         
         return evaluation_summary
     
     else:
         # Fallback: If no evaluation results, do comprehensive evaluation
-        logger.info("DEBUG: No existing evaluation results, starting comprehensive evaluation...")
-        if qa_data and 'questions' in qa_data:
-            logger.info(f"DEBUG: Found {len(qa_data['questions'])} questions in qa_data")
+        logger.info("Starting comprehensive evaluation (no cached results)...")
         
         evaluation_results = await processor.create_comprehensive_evaluation(qa_data, db, answer_id)
         
-        logger.info(f"DEBUG: Comprehensive evaluation complete.")
-        logger.info(f"DEBUG: evaluation_results type: {type(evaluation_results)}")
-        logger.info(f"DEBUG: evaluation_results keys: {list(evaluation_results.keys()) if evaluation_results else 'None'}")
         if evaluation_results and 'question_evaluations' in evaluation_results:
-            logger.info(f"DEBUG: Found {len(evaluation_results['question_evaluations'])} question evaluations")
+            logger.info(f"✅ Comprehensive evaluation complete: {len(evaluation_results['question_evaluations'])} questions evaluated")
         else:
-            logger.error("DEBUG: NO question_evaluations key found in evaluation_results!")
-        
-        # Debug: Log the final structure before returning  
-        if evaluation_results:
-            logger.info(f"DEBUG: FINAL FALLBACK RETURN - evaluation_results type: {type(evaluation_results)}")
-            logger.info(f"DEBUG: FINAL FALLBACK RETURN - evaluation_results keys: {list(evaluation_results.keys())}")
-            if 'question_evaluations' in evaluation_results:
-                logger.info(f"DEBUG: FINAL FALLBACK RETURN - question_evaluations count: {len(evaluation_results['question_evaluations'])}")
+            logger.error("Evaluation failed: no question_evaluations generated")
         
         return evaluation_results

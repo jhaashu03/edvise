@@ -6,6 +6,7 @@ import os
 import uuid
 import time
 import traceback
+import asyncio
 from pathlib import Path
 import json
 from datetime import datetime
@@ -17,12 +18,14 @@ from app.api.api_v1.endpoints.auth import get_current_user
 from app.schemas.answer import (
     AnswerCreate, AnswerResponse, AnswerUploadResponse, 
     AnswerEvaluation, AnswerEvaluationSchema,
-    AnswerEvaluationCreate
+    AnswerEvaluationCreate, EvaluationOption, EvaluationRequest
 )
 from app.core.config import settings
 from app.utils.vision_pdf_processor import VisionPDFProcessor
 from app.core.llm_service import get_llm_service, LLMService
 from app.utils.vision_pdf_processor import ProgressTracker
+from app.services.topper_comparison_service import TopperComparisonService
+from app.db.database import SessionLocal
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -49,1265 +52,1052 @@ async def save_uploaded_file(file: UploadFile) -> str:
     logger.info(f"File saved to {file_path}")
     return str(file_path)
 
-def comprehensive_pdf_evaluation(answer_id: int, file_path: str):
-    """Enhanced background task for comprehensive PDF evaluation with robust session handling"""
-    print(f"DEBUG: comprehensive_pdf_evaluation called with answer_id={answer_id}")
-    logger.info(f"comprehensive_pdf_evaluation called with answer_id={answer_id}")
+# Background task functions for separate evaluation types
+async def dimensional_pdf_evaluation(answer_id: int, file_path: str, task_id: str, paper_subject: str = None):
+    """
+    Background task for 13-dimensional AI evaluation only.
     
-    # Create a fresh database session for this background task
-    from app.db.database import SessionLocal
+    Args:
+        answer_id: ID of the answer to evaluate
+        file_path: Path to the PDF file
+        task_id: Unique task ID for progress tracking
+        paper_subject: Optional paper-level subject (gs1, gs2, gs3, gs4, anthropology).
+                      If provided, all questions use this subject's rubric.
+    """
     local_db = SessionLocal()
     
-    # CRITICAL: Flag to track evaluation creation
-    evaluation_created = False
-    
     try:
-        # Get answer record with fresh session
-        answer = local_db.query(Answer).filter(Answer.id == answer_id).first()
-        if not answer:
-            logger.error(f"Answer {answer_id} not found")
-            return
+        if paper_subject:
+            logger.info(f"🔍 Starting 13-dimensional evaluation for answer {answer_id} with paper subject: {paper_subject.upper()}")
+        else:
+            logger.info(f"🔍 Starting 13-dimensional evaluation for answer {answer_id} (auto-detect subjects)")
         
-        # Set up WebSocket progress tracking
-        from app.api.websocket_progress import progress_manager, create_progress_callback
-        import asyncio
-        
-        # Get task_id from answer record (set by upload endpoint)
-        task_id = answer.task_id
-        if not task_id:
-            # Fallback: generate task_id if not set (shouldn't happen in normal flow)
-            import uuid
-            task_id = f"pdf_eval_{answer_id}_{uuid.uuid4().hex[:8]}"
-            answer.task_id = task_id
-            local_db.commit()
-        
-        # Create WebSocket progress callback
-        websocket_progress_callback = create_progress_callback(task_id)
-        
-        # Combined progress callback that updates both DB and WebSocket
-        async def progress_callback(progress_data):
-            print(f"🚀 DEBUG: progress_callback called with data: {progress_data}")
-            logger.info(f"🚀 DEBUG: progress_callback called with data: {progress_data}")
-            
-            # Handle both old-style progress (just number) and new-style (dict)
-            if isinstance(progress_data, (int, float)):
-                progress_value = progress_data
-                progress_dict = {
-                    "phase": "processing",
-                    "progress": progress_value,
-                    "message": f"Processing: {progress_value}%"
-                }
-            else:
-                progress_dict = progress_data
-                progress_value = progress_dict.get("progress", 0)
-            
-            print(f"📊 DEBUG: Sending progress to DB and WebSocket - progress: {progress_value}%, dict: {progress_dict}")
-            logger.info(f"📊 DEBUG: Sending progress to DB and WebSocket - progress: {progress_value}%, dict: {progress_dict}")
-            
-            # Update database
-            answer.processing_progress = progress_value
-            local_db.commit()
-            print(f"💾 DEBUG: Database updated with progress: {progress_value}%")
-            
-            # Send to WebSocket
-            try:
-                await websocket_progress_callback(progress_dict)
-                print(f"📡 DEBUG: WebSocket message sent successfully for task_id: {task_id}")
-                logger.info(f"📡 DEBUG: WebSocket message sent successfully for task_id: {task_id}")
-            except Exception as ws_error:
-                print(f"❌ DEBUG: WebSocket send failed: {ws_error}")
-                logger.error(f"❌ DEBUG: WebSocket send failed: {ws_error}")
-            
-            logger.info(f"Answer {answer_id} progress: {progress_value}%")
-        
-        # Process the PDF using the same method as our working debug script
-        logger.info(f"Starting PDF processing for answer_id={answer_id}")
-        
-        # Import workflow functions
+        # Import the vision processor function
         from app.utils.vision_pdf_processor import process_vision_pdf_with_evaluation
-        import asyncio
         
-        # LangGraph workflow support (new)
-        try:
-            from app.workflows import langgraph_comprehensive_pdf_evaluation
-            LANGGRAPH_AVAILABLE = True
-            logger.info("✅ LangGraph workflows available")
-        except ImportError as e:
-            LANGGRAPH_AVAILABLE = False
-            logger.warning(f"⚠️ LangGraph not available: {e}")
-
-        # Import workflow configuration
-        from app.core.workflow_config import WorkflowConfig
+        # Add progress callback for dimensional evaluation
+        from app.api.websocket_progress import progress_manager
+        from datetime import datetime
         
-        # Determine which workflow to use
-        use_langgraph = LANGGRAPH_AVAILABLE and WorkflowConfig.should_use_langgraph(
-            user_id=answer.user_id,
-            force_mode=None  # Could be set via query param for testing
+        def progress_callback(callback_data: dict):
+            """Send progress updates via WebSocket"""
+            try:
+                # Use asyncio.create_task to schedule the coroutine
+                import asyncio
+                try:
+                    # Try to get the current event loop
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # If loop is running, schedule the task
+                        asyncio.create_task(progress_manager.send_progress_update(task_id, {
+                            "progress": callback_data.get("progress", 0),
+                            "message": callback_data.get("message", "Processing..."),
+                            "timestamp": datetime.now().isoformat(),
+                            "phase": callback_data.get("phase"),
+                            "details": callback_data.get("details")
+                        }))
+                    else:
+                        # If no loop is running, run until complete
+                        loop.run_until_complete(progress_manager.send_progress_update(task_id, {
+                            "progress": callback_data.get("progress", 0),
+                            "message": callback_data.get("message", "Processing..."),
+                            "timestamp": datetime.now().isoformat(),
+                            "phase": callback_data.get("phase"),
+                            "details": callback_data.get("details")
+                        }))
+                except RuntimeError:
+                    # If there's an event loop issue, just log and continue
+                    logger.debug(f"Progress update skipped due to event loop conflict: {callback_data.get('message', 'Processing...')}")
+            except Exception as e:
+                logger.warning(f"Failed to send progress update: {e}")
+        
+        # Process PDF with dimensional evaluation
+        evaluation_results = await process_vision_pdf_with_evaluation(
+            file_path=file_path,
+            answer_id=answer_id,
+            db=local_db,
+            progress_callback=progress_callback,
+            paper_subject=paper_subject  # Pass paper-level subject for consistent evaluation
         )
         
-        workflow_name = "LangGraph" if use_langgraph else "Legacy"
-        if use_langgraph:
-            logger.info(f"🎯 ============================================")
-            logger.info(f"🎯 🚀 USING LANGGRAPH WORKFLOW 🚀")
-            logger.info(f"🎯 Answer ID: {answer_id}")
-            logger.info(f"🎯 User ID: {answer.user_id}")
-            logger.info(f"🎯 ============================================")
+        if evaluation_results and evaluation_results.get('question_evaluations'):
+            question_evaluations = evaluation_results['question_evaluations']
+            total_questions = len(question_evaluations)
+            
+            # Calculate scores from dimensional evaluation
+            total_score = 0.0
+            max_score = total_questions * 10.0
+            
+            # Extract dimensional scores
+            total_structure_score = 0.0
+            total_coverage_score = 0.0
+            total_tone_score = 0.0
+            valid_evaluations = 0
+            
+            logger.info(f"Processing {len(question_evaluations)} question evaluations")
+            for i, q_eval in enumerate(question_evaluations):
+                # Check for answer_evaluation field
+                if isinstance(q_eval, dict) and q_eval.get('answer_evaluation'):
+                    answer_evaluation = q_eval['answer_evaluation']
+                    
+                    if isinstance(answer_evaluation, dict):
+                        # Look for dimensional_scores in answer_evaluation
+                        dimensions = answer_evaluation.get('dimensional_scores', {})
+                        
+                        if dimensions:
+                            # Parse scores helper function
+                            def parse_score(score_str):
+                                try:
+                                    if isinstance(score_str, (int, float)):
+                                        return float(score_str)
+                                    elif isinstance(score_str, str) and '/' in score_str:
+                                        return float(score_str.split('/')[0])
+                                    return 0.0
+                                except Exception:
+                                    return 0.0
+                            
+                            # Extract all 13 dimensional scores
+                            dimension_names = [
+                                'Structure', 'Coverage', 'Tone_and_Language', 'Analytical_Thinking',
+                                'Factual_Accuracy', 'Conceptual_Understanding', 'Examples_and_Illustrations',
+                                'Balanced_Perspective', 'Conclusion', 'Relevance', 'Clarity', 'Depth', 'Presentation'
+                            ]
+                            
+                            question_total = 0
+                            valid_dimensions = 0
+                            
+                            for dim_name in dimension_names:
+                                dim_data = dimensions.get(dim_name, {})
+                                if isinstance(dim_data, dict):
+                                    score = parse_score(dim_data.get('score', 0))
+                                    question_total += score
+                                    valid_dimensions += 1
+                            
+                            if valid_dimensions > 0:
+                                question_avg = question_total / valid_dimensions
+                                total_structure_score += question_avg
+                                total_coverage_score += question_avg
+                                total_tone_score += question_avg
+                                valid_evaluations += 1
+            
+            # Calculate averages and collect detailed feedback
+            detailed_feedback_sections = []
+            all_strengths = []
+            all_improvements = []
+            
+            if valid_evaluations > 0:
+                avg_structure = total_structure_score / valid_evaluations
+                avg_coverage = total_coverage_score / valid_evaluations
+                avg_tone = total_tone_score / valid_evaluations
+                total_score = (avg_structure + avg_coverage + avg_tone) * total_questions / 3
+                
+                # Collect detailed feedback from each question
+                for i, q_eval in enumerate(question_evaluations):
+                    if isinstance(q_eval, dict) and q_eval.get('answer_evaluation'):
+                        answer_eval = q_eval['answer_evaluation']
+                        if isinstance(answer_eval, dict):
+                            # Add question-specific feedback
+                            q_num = q_eval.get('question_number', f'Q{i+1}')
+                            q_text = q_eval.get('question_text', 'Question text not available')[:100] + "..."
+                            
+                            detailed_feedback_sections.append(f"### 📝 {q_num}: {q_text}")
+                            
+                            # Add dimensional scores and feedback
+                            dimensions = answer_eval.get('dimensional_scores', {})
+                            if dimensions:
+                                detailed_feedback_sections.append("**Dimensional Analysis:**")
+                                for dim_name, dim_data in dimensions.items():
+                                    if isinstance(dim_data, dict):
+                                        score = dim_data.get('score', 0)
+                                        feedback_text = dim_data.get('feedback', 'No feedback available')
+                                        detailed_feedback_sections.append(f"- **{dim_name}** ({score}/10): {feedback_text}")
+                            
+                            # Collect strengths and improvements
+                            if answer_eval.get('strengths'):
+                                strengths = answer_eval.get('strengths', [])
+                                if isinstance(strengths, list):
+                                    all_strengths.extend(strengths)
+                                elif isinstance(strengths, str):
+                                    try:
+                                        import ast
+                                        all_strengths.extend(ast.literal_eval(strengths))
+                                    except:
+                                        all_strengths.append(strengths)
+                            
+                            if answer_eval.get('improvements'):
+                                improvements = answer_eval.get('improvements', [])
+                                if isinstance(improvements, list):
+                                    all_improvements.extend(improvements)
+                                elif isinstance(improvements, str):
+                                    try:
+                                        import ast
+                                        all_improvements.extend(ast.literal_eval(improvements))
+                                    except:
+                                        all_improvements.append(improvements)
+                            
+                            detailed_feedback_sections.append("")  # Add spacing
+                
+            else:
+                avg_structure = avg_coverage = avg_tone = 6.0
+                total_score = total_questions * 6.0
+            
+            # Create comprehensive feedback with actual dimensional analysis
+            feedback = f"""# 📊 13-Dimensional AI Analysis Results
+
+**📈 Overall Performance**: {total_score:.1f}/{max_score:.0f} ({(total_score/max_score*100):.1f}%)
+**📚 Questions Analyzed**: {total_questions}
+**⚙️ Analysis Method**: 13-Dimensional AI Evaluation
+
+## 🎯 Dimensional Scores:
+- **Structure**: {avg_structure:.1f}/10
+- **Coverage**: {avg_coverage:.1f}/10  
+- **Tone & Language**: {avg_tone:.1f}/10
+
+## 📋 Detailed Analysis:
+
+{chr(10).join(detailed_feedback_sections) if detailed_feedback_sections else f'{len(question_evaluations)} questions were comprehensively analyzed across 13 key dimensions including structure, content coverage, tone, clarity, and more.'}
+
+## 🚀 Key Strengths:
+{chr(10).join([f'- {strength}' for strength in all_strengths[:5]]) if all_strengths else '''- Comprehensive AI-powered analysis completed
+- All questions evaluated systematically
+- Detailed dimensional scoring provided'''}
+
+## 📈 Areas for Improvement:
+{chr(10).join([f'- {improvement}' for improvement in all_improvements[:5]]) if all_improvements else '''- Review dimensional feedback for specific insights
+- Focus on lower-scoring dimensions
+- Practice structured answer writing'''}"""
+            
+            # Collect actionable data from all question evaluations
+            all_actionable_data = {
+                "questions": [],
+                "total_questions": total_questions,
+                "overall_score": total_score,
+                "max_score": max_score,
+                "avg_structure": avg_structure,
+                "avg_coverage": avg_coverage,
+                "avg_tone": avg_tone
+            }
+            
+            for i, q_eval in enumerate(question_evaluations):
+                if isinstance(q_eval, dict) and q_eval.get('answer_evaluation'):
+                    answer_eval = q_eval['answer_evaluation']
+                    if isinstance(answer_eval, dict):
+                        # Extract actionable fields for frontend display
+                        question_actionable = {
+                            "question_number": q_eval.get('question_number', i + 1),
+                            "question_text": q_eval.get('question_text', ''),
+                            "marks": q_eval.get('marks', 10),
+                            "detected_subject": answer_eval.get('detected_subject'),
+                            "demand_analysis": answer_eval.get('demand_analysis'),
+                            "structure": answer_eval.get('structure'),
+                            "content_quality": answer_eval.get('content_quality'),
+                            "examples": answer_eval.get('examples'),
+                            "diagram_suggestion": answer_eval.get('diagram_suggestion'),
+                            "value_additions": answer_eval.get('value_additions'),
+                            "presentation": answer_eval.get('presentation'),
+                            "overall_score": answer_eval.get('overall_score'),
+                            "quick_verdict": answer_eval.get('quick_verdict'),
+                            "top_3_improvements": answer_eval.get('top_3_improvements'),
+                            "dimensional_scores": answer_eval.get('dimensional_scores'),
+                            "strengths": answer_eval.get('strengths', []),
+                            "improvements": answer_eval.get('improvements', [])
+                        }
+                        all_actionable_data["questions"].append(question_actionable)
+            
+            # Create evaluation record
+            from app.crud.answer import create_answer_evaluation
+            evaluation_data = AnswerEvaluationCreate(
+                score=total_score,
+                max_score=max_score,
+                feedback=feedback,
+                strengths=str([
+                    "13-dimensional analysis completed",
+                    f"All {total_questions} questions evaluated",
+                    "AI-powered comprehensive feedback",
+                    "Structured dimensional scoring"
+                ]),
+                improvements=str([
+                    "Review dimensional scores for insights",
+                    "Focus on improving lower-scoring areas",
+                    "Practice structured answer techniques",
+                    "Enhance content depth and clarity"
+                ]),
+                structure=avg_structure,
+                coverage=avg_coverage,
+                tone=avg_tone,
+                actionable_data=json.dumps(all_actionable_data)  # Store full actionable data
+            )
+            
+            create_answer_evaluation(local_db, evaluation_data, answer_id)
+            logger.info(f"✅ 13-dimensional evaluation completed for answer {answer_id}")
+            
+            # Send final completion signal to frontend
+            try:
+                import asyncio
+                async def send_completion():
+                    await progress_manager.send_progress_update(task_id, {
+                        "progress": 100,
+                        "message": "✅ Evaluation Complete - Results Ready!",
+                        "timestamp": datetime.now().isoformat(),
+                        "phase": "completed",
+                        "details": "Evaluation finished successfully",
+                        "status": "completed",
+                        "answer_id": answer_id
+                    })
+                
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(send_completion())
+                    else:
+                        loop.run_until_complete(send_completion())
+                except RuntimeError:
+                    logger.debug("Completion signal skipped due to event loop conflict")
+            except Exception as e:
+                logger.warning(f"Failed to send completion signal: {e}")
+            
         else:
-            logger.info(f"🔄 Using {workflow_name} workflow for answer {answer_id}")
+            logger.error(f"❌ Failed to process PDF for dimensional evaluation: {answer_id}")
+            
+            # Send error completion signal
+            try:
+                import asyncio
+                async def send_error():
+                    await progress_manager.send_progress_update(task_id, {
+                        "progress": 100,
+                        "message": "❌ Evaluation Failed",
+                        "timestamp": datetime.now().isoformat(),
+                        "phase": "error",
+                        "details": "PDF processing failed",
+                        "status": "error",
+                        "answer_id": answer_id
+                    })
+                
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(send_error())
+                    else:
+                        loop.run_until_complete(send_error())
+                except RuntimeError:
+                    logger.debug("Error signal skipped due to event loop conflict")
+            except Exception as e:
+                logger.warning(f"Failed to send error signal: {e}")
+            
+    except Exception as e:
+        logger.error(f"❌ Error in dimensional evaluation: {e}")
+        logger.error(f"❌ Traceback: {traceback.format_exc()}")
         
+        # Send error completion signal
         try:
-            # Background tasks don't have an event loop, so we need to create one
-            # This is the proper way to run async code in FastAPI background tasks
+            import asyncio
+            error_message = str(e)
+            async def send_error():
+                await progress_manager.send_progress_update(task_id, {
+                    "progress": 100,
+                    "message": "❌ Evaluation Error",
+                    "timestamp": datetime.now().isoformat(),
+                    "phase": "error",
+                    "details": f"Error: {error_message[:100]}",
+                    "status": "error",
+                    "answer_id": answer_id
+                })
+            
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.create_task(send_error())
+                else:
+                    loop.run_until_complete(send_error())
+            except RuntimeError:
+                logger.debug("Error signal skipped due to event loop conflict")
+        except Exception as signal_error:
+            logger.warning(f"Failed to send error signal: {signal_error}")
+    finally:
+        local_db.close()
+
+async def topper_comparison_evaluation(answer_id: int, file_path: str, task_id: str):
+    """Background task for topper comparison evaluation only"""
+    local_db = SessionLocal()
+    
+    try:
+        logger.info(f" Starting topper comparison evaluation for answer {answer_id}")
+        
+        # Extract content from PDF using vision processor (questions only, no 13D evaluation)
+        from app.utils.vision_pdf_processor import VisionPDFProcessor
+        from app.api.websocket_progress import progress_manager
+        from datetime import datetime
+        
+        def progress_callback(callback_data: dict):
+            """Send progress updates via WebSocket"""
+            try:
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(progress_manager.send_progress_update(task_id, {
+                            "progress": callback_data.get("progress", 0),
+                            "message": callback_data.get("message", "Processing..."),
+                            "timestamp": datetime.now().isoformat(),
+                            "phase": callback_data.get("phase"),
+                            "details": callback_data.get("details")
+                        }))
+                    else:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        loop.run_until_complete(progress_manager.send_progress_update(task_id, {
+                            "progress": callback_data.get("progress", 0),
+                            "message": callback_data.get("message", "Processing..."),
+                            "timestamp": datetime.now().isoformat(),
+                            "phase": callback_data.get("phase"),
+                            "details": callback_data.get("details")
+                        }))
+                except RuntimeError:
+                    logger.debug("Progress update skipped due to event loop conflict")
+            except Exception as e:
+                logger.warning(f"Failed to send progress update: {e}")
+        
+        # Extract questions and answers only (no 13D evaluation)
+        processor = VisionPDFProcessor(progress_callback=progress_callback)
+        pdf_results = await processor.extract_questions_only(file_path, progress_callback)
+        
+        if pdf_results and pdf_results.get('questions'):
+            # Process ALL questions for topper comparison
+            questions = pdf_results['questions']
+            logger.info(f"📋 Questions data type: {type(questions)}, length: {len(questions) if questions else 0}")
+            
+            if questions:
+                # Handle both dict and list formats
+                if isinstance(questions, dict):
+                    questions_list = list(questions.values())
+                    logger.info(f"📋 Converted dict to list: {len(questions_list)} questions")
+                elif isinstance(questions, list):
+                    questions_list = questions
+                    logger.info(f"📋 Using list directly: {len(questions_list)} questions")
+                else:
+                    logger.error(f"Unexpected questions format: {type(questions)}")
+                    return
+                
+                # Debug first question structure
+                if questions_list:
+                    first_q = questions_list[0]
+                    logger.info(f"📋 First question keys: {list(first_q.keys()) if isinstance(first_q, dict) else 'Not a dict'}")
+                    logger.info(f"📋 First question sample: {str(first_q)[:200]}...")
+                
+                # Initialize topper comparison service
+                topper_service = TopperComparisonService()
+                
+                # Process each question individually
+                all_topper_evaluations = []
+                for i, question in enumerate(questions_list):
+                    question_text = question.get('question_text', '')
+                    student_answer = question.get('student_answer', '')  # Changed from 'complete_answer' to 'student_answer'
+                    marks_data = question.get('marks', '10')  # Changed from nested metadata to direct 'marks' field
+                    
+                    # Parse marks from string like "10 marks" or "15"
+                    import re
+                    marks_match = re.search(r'\d+', str(marks_data))
+                    marks = int(marks_match.group()) if marks_match else 10
+                    
+                    # Skip if no question or answer
+                    if not question_text.strip() or not student_answer.strip():
+                        logger.warning(f"Skipping Q{i+1}: question_text='{question_text[:50]}...', student_answer='{student_answer[:50]}...'")
+                        continue
+                    
+                    logger.info(f"Processing Q{i+1}: '{question_text[:100]}...' with {len(student_answer)} chars")
+                    
+                    # Perform topper comparison for this specific question
+                    topper_evaluation = await topper_service.generate_topper_based_evaluation(
+                        question_text=question_text,
+                        student_answer=student_answer,
+                        marks=marks
+                    )
+                    
+                    # Add question number and details
+                    topper_evaluation['question_number'] = i + 1
+                    topper_evaluation['question_text'] = question_text[:100] + "..." if len(question_text) > 100 else question_text
+                    
+                    all_topper_evaluations.append(topper_evaluation)
+                    
+                    # Send progress update for each question
+                    progress_percentage = 50 + (30 * (i + 1) / len(questions_list))  # 50-80% range
+                    await progress_manager.send_progress_update(task_id, {
+                        "progress": int(progress_percentage),
+                        "message": f"📊 Analyzing Question {i+1} with Toppers",
+                        "timestamp": datetime.now().isoformat(),
+                        "phase": "topper_comparison",
+                        "details": f"Comparing Q{i+1} with topper answers",
+                        "answer_id": answer_id
+                    })
+                
+                # Combine all evaluations into comprehensive feedback
+                if all_topper_evaluations:
+                    combined_feedback = []
+                    total_score = 0
+                    total_max_score = 0
+                    
+                    for eval_result in all_topper_evaluations:
+                        q_num = eval_result.get('question_number', 1)
+                        q_text = eval_result.get('question_text', 'Question')
+                        
+                        combined_feedback.append(f"\n🔍 **QUESTION {q_num} ANALYSIS**")
+                        combined_feedback.append(f"**Question**: {q_text}")
+                        combined_feedback.append(f"**Score**: {eval_result.get('score', 0)}/{eval_result.get('max_score', 10)}")
+                        combined_feedback.append("---")
+                        combined_feedback.append(eval_result.get('feedback', 'No feedback available'))
+                        combined_feedback.append("\n" + "="*50 + "\n")
+                        
+                        total_score += eval_result.get('score', 0)
+                        total_max_score += eval_result.get('max_score', 10)
+                    
+                    # Create final combined evaluation
+                    topper_evaluation = {
+                        'evaluation_type': 'topper_comparison_multi_question',
+                        'comparison_available': True,
+                        'total_score': round(total_score, 1),
+                        'total_max_score': total_max_score,
+                        'questions_analyzed': len(all_topper_evaluations),
+                        'feedback': '\n'.join(combined_feedback),
+                        'individual_evaluations': all_topper_evaluations
+                    }
+                else:
+                    topper_evaluation = {
+                        'evaluation_type': 'topper_comparison',
+                        'comparison_available': False,
+                        'score': 0.0,
+                        'max_score': 0.0,
+                        'feedback': 'No valid questions found for topper comparison'
+                    }
+            
+            # Create evaluation record in database
+            if topper_evaluation:
+                # Calculate proper dimensional scores from individual evaluations
+                total_structure = sum(eval_result.get('structure', 0) for eval_result in all_topper_evaluations)
+                total_coverage = sum(eval_result.get('coverage', 0) for eval_result in all_topper_evaluations)
+                total_tone = sum(eval_result.get('tone', 0) for eval_result in all_topper_evaluations)
+                
+                evaluation_record = Evaluation(
+                    answer_id=answer_id,
+                    score=topper_evaluation.get('total_score', 0.0),
+                    max_score=topper_evaluation.get('total_max_score', 10.0),
+                    feedback=topper_evaluation.get('feedback', 'Topper comparison completed'),
+                    structure=round(total_structure, 1),
+                    coverage=round(total_coverage, 1),
+                    tone=round(total_tone, 1),
+                    strengths=json.dumps(topper_evaluation.get('topper_insights', {}).get('student_strengths', [])),
+                    improvements=json.dumps(topper_evaluation.get('topper_insights', {}).get('specific_improvements', []))
+                )
+                
+                local_db.add(evaluation_record)
+                local_db.commit()
+                local_db.refresh(evaluation_record)
+                
+                logger.info(f"✅ Topper comparison evaluation saved for answer {answer_id}")
+                
+                # Send final completion signal to frontend
+                try:
+                    import asyncio
+                    async def send_completion():
+                        await progress_manager.send_progress_update(task_id, {
+                            "progress": 100,
+                            "message": "✅ Topper Comparison Complete - Results Ready!",
+                            "timestamp": datetime.now().isoformat(),
+                            "phase": "completed",
+                            "details": "Topper comparison finished successfully",
+                            "status": "completed",
+                            "answer_id": answer_id
+                        })
+                    
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            asyncio.create_task(send_completion())
+                        else:
+                            loop.run_until_complete(send_completion())
+                    except RuntimeError:
+                        logger.debug("Completion signal skipped due to event loop conflict")
+                except Exception as e:
+                    logger.warning(f"Failed to send completion signal: {e}")
+        else:
+            logger.error(f"❌ Failed to extract content from PDF for answer {answer_id}")
+            evaluation = None
+        
+        if topper_evaluation:
+            logger.info(f"✅ Topper comparison evaluation completed for answer {answer_id}")
+        else:
+            logger.error(f"❌ Failed to generate topper comparison evaluation for answer {answer_id}")
+            
+            # Send error completion signal
+            try:
+                import asyncio
+                async def send_error():
+                    await progress_manager.send_progress_update(task_id, {
+                        "progress": 100,
+                        "message": "❌ Topper Comparison Failed",
+                        "timestamp": datetime.now().isoformat(),
+                        "phase": "error",
+                        "details": "Topper comparison processing failed",
+                        "status": "error",
+                        "answer_id": answer_id
+                    })
+                
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(send_error())
+                    else:
+                        loop.run_until_complete(send_error())
+                except RuntimeError:
+                    logger.debug("Error signal skipped due to event loop conflict")
+            except Exception as e:
+                logger.warning(f"Failed to send error signal: {e}")
+            
+    except Exception as e:
+        logger.error(f"❌ Error in topper comparison evaluation: {e}")
+        logger.error(f"❌ Traceback: {traceback.format_exc()}")
+        
+        # Send error completion signal
+        try:
+            import asyncio
+            async def send_error():
+                await progress_manager.send_progress_update(task_id, {
+                    "progress": 100,
+                    "message": "❌ Topper Comparison Error",
+                    "timestamp": datetime.now().isoformat(),
+                    "phase": "error",
+                    "details": "Topper comparison processing failed",
+                    "status": "error",
+                    "answer_id": answer_id
+                })
+            
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.create_task(send_error())
+                else:
+                    loop.run_until_complete(send_error())
+            except RuntimeError:
+                logger.debug("Error signal skipped due to event loop conflict")
+        except Exception as signal_error:
+            logger.warning(f"Failed to send error signal: {signal_error}")
+    finally:
+        local_db.close()
+
+# Legacy function - kept for backward compatibility but deprecated
+def comprehensive_pdf_evaluation(answer_id: int, file_path: str, evaluation_type: str = "dimensional"):
+    """
+    DEPRECATED: Use dimensional_pdf_evaluation() or topper_comparison_evaluation() instead.
+    This function is kept for backward compatibility only.
+    """
+    logger.warning(f"Using deprecated comprehensive_pdf_evaluation for answer {answer_id}. Use separate evaluation functions instead.")
+    
+    # Route to appropriate evaluation function based on type
+    if evaluation_type == "topper_comparison":
+        import asyncio
+        asyncio.create_task(topper_comparison_evaluation(answer_id, file_path))
+    else:
+        import asyncio
+        asyncio.create_task(dimensional_pdf_evaluation(answer_id, file_path))
+
+
+def _create_topper_comparison_evaluation(answer_id: int, evaluation_results: dict, local_db):
+    """Create topper comparison based evaluation"""
+    try:
+        from app.services.topper_comparison_service import TopperComparisonService
+        
+        logger.info(f"Creating topper comparison evaluation for answer {answer_id}")
+        
+        # Extract question and answer from evaluation results
+        if "question_evaluations" in evaluation_results and len(evaluation_results["question_evaluations"]) > 0:
+            first_question = evaluation_results["question_evaluations"][0]
+            question_text = first_question.get("question_text", "")
+            student_answer = first_question.get("student_answer", "")
+            marks = first_question.get("marks", 10)
+            
+            # Initialize topper comparison service
+            topper_service = TopperComparisonService()
+            
+            # Generate topper-based evaluation (this is async but we'll handle it)
+            import asyncio
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             
             try:
-                # Execute chosen workflow
-                if use_langgraph:
-                    # LangGraph workflow
-                    evaluation_results = loop.run_until_complete(
-                        langgraph_comprehensive_pdf_evaluation(
-                            answer_id=answer_id,
-                            file_path=answer.file_path,
-                            content=answer.content,
-                            db_session=local_db,
-                            progress_callback=progress_callback
-                        )
-                    )
-                    logger.info(f"🎯 ============================================")
-                    logger.info(f"🎯 ✅ LANGGRAPH EVALUATION COMPLETED ✅")
-                    logger.info(f"🎯 Answer ID: {answer_id}")
-                    logger.info(f"🎯 ============================================")
-                else:
-                    # Legacy workflow
-                    evaluation_results = loop.run_until_complete(
-                        process_vision_pdf_with_evaluation(answer.file_path, local_db, answer_id, progress_callback)
-                    )
-                    logger.info(f"✅ Legacy evaluation completed for answer {answer_id}")
+                topper_evaluation = loop.run_until_complete(
+                    topper_service.generate_topper_based_evaluation(question_text, student_answer, marks)
+                )
                 
-                logger.info(f"PDF processing completed successfully - type: {type(evaluation_results)}")
+                # Create evaluation record
+                new_evaluation = Evaluation(
+                    answer_id=answer_id,
+                    score=topper_evaluation.get('score', 0.0),
+                    max_score=topper_evaluation.get('max_score', 10.0),
+                    feedback=topper_evaluation.get('feedback', 'Topper comparison evaluation completed'),
+                    structure=topper_evaluation.get('structure', 7.0),
+                    coverage=topper_evaluation.get('coverage', 6.0),
+                    tone=topper_evaluation.get('tone', 7.0),
+                    strengths=json.dumps(topper_evaluation.get('topper_insights', {}).get('student_strengths', [])),
+                    improvements=json.dumps(topper_evaluation.get('topper_insights', {}).get('specific_improvements', []))
+                )
+                
+                local_db.add(new_evaluation)
+                local_db.commit()
+                local_db.refresh(new_evaluation)
+                
+                logger.info(f"✅ SUCCESS: Topper comparison evaluation created with ID: {new_evaluation.id}")
                 
             finally:
                 loop.close()
-                
-        except Exception as processing_error:
-            logger.error(f"Error in PDF processing: {processing_error}", exc_info=True)
-            raise processing_error
-        
-        logger.info(f"PDF processing completed. Results type: {type(evaluation_results)}")
-        
-        if not evaluation_results or not isinstance(evaluation_results, dict):
-            raise ValueError("PDF processing failed - invalid results returned")
-        
-        # IMMEDIATE COMPREHENSIVE EVALUATION CREATION - Extract detailed analysis
-        if "question_evaluations" in evaluation_results and len(evaluation_results["question_evaluations"]) > 0:
-            
-            logger.info(f"Found {len(evaluation_results['question_evaluations'])} question evaluations - extracting comprehensive analysis")
-            
-            question_evaluations = evaluation_results["question_evaluations"]
-            
-            # CRITICAL DEBUG: Log the structure of question evaluations
-            logger.info(f"🔍 DEBUG: EARLY PATH - Processing {len(question_evaluations)} evaluations")
-            if question_evaluations:
-                first_eval = question_evaluations[0]
-                logger.info(f"📊 DEBUG: EARLY PATH - First evaluation type: {type(first_eval)}")
-                logger.info(f"📊 DEBUG: EARLY PATH - First evaluation keys: {list(first_eval.keys()) if isinstance(first_eval, dict) else 'NOT_DICT'}")
-                if isinstance(first_eval, dict):
-                    # Check detailed_feedback structure
-                    if 'detailed_feedback' in first_eval:
-                        detailed_feedback = first_eval['detailed_feedback']
-                        logger.info(f"📝 DEBUG: EARLY PATH - detailed_feedback type: {type(detailed_feedback)}")
-                        if isinstance(detailed_feedback, dict):
-                            logger.info(f"📝 DEBUG: EARLY PATH - detailed_feedback keys: {list(detailed_feedback.keys())}")
-                            # Check for dimensional_scores specifically
-                            if 'dimensional_scores' in detailed_feedback:
-                                logger.info(f"✅ DEBUG: EARLY PATH - dimensional_scores found!")
-                            else:
-                                logger.info(f"❌ DEBUG: EARLY PATH - No dimensional_scores in detailed_feedback")
-                        else:
-                            logger.info(f"📝 DEBUG: EARLY PATH - detailed_feedback is not dict: {str(detailed_feedback)[:200]}")
-                    else:
-                        logger.info(f"❌ DEBUG: EARLY PATH - No detailed_feedback in evaluation")
-                    
-                    # Also check answer_evaluation if it exists
-                    if 'answer_evaluation' in first_eval:
-                        answer_eval = first_eval['answer_evaluation']
-                        logger.info(f"📊 DEBUG: EARLY PATH - answer_evaluation type: {type(answer_eval)}")
-                        if isinstance(answer_eval, dict):
-                            logger.info(f"📊 DEBUG: EARLY PATH - answer_evaluation keys: {list(answer_eval.keys())}")
-            
-            # Initialize score tracking
-            score_value = 0.0  # We'll calculate this from individual questions
-            max_score_value = 0.0
-            
-            # Extract comprehensive feedback from question evaluations
-            comprehensive_feedback_parts = []
-            total_structure_score = 0.0
-            total_coverage_score = 0.0
-            total_tone_score = 0.0
-            strengths_list = []
-            improvements_list = []
-            
-            comprehensive_feedback_parts.append(f"📊 **Comprehensive PDF Evaluation Report**")
-            comprehensive_feedback_parts.append(f"**Total Score**: {score_value}/{max_score_value} ({evaluation_results.get('score_percentage', 0):.1f}%)")
-            comprehensive_feedback_parts.append(f"**Questions Analyzed**: {len(question_evaluations)} with 13-dimensional evaluation")
-            comprehensive_feedback_parts.append("")
-            
-            # Process each question's comprehensive analysis
-            for idx, q_eval in enumerate(question_evaluations[:10]):  # Limit to first 10 for brevity
-                q_num = q_eval.get("question_number", idx + 1)
-                q_text = q_eval.get("question_text", "")[:100] + "..."
-                
-                # FIXED: Use detailed_feedback which contains the analysis structure
-                detailed_feedback = q_eval.get("detailed_feedback")  # This contains the analysis with dimensional_scores
-                current_q_score = q_eval.get("current_score", 0.0)  # Direct score from EvaluationResult
-                
-                logger.info(f"🔍 Q{q_num} PROCESSING: current_score={current_q_score}, detailed_feedback type={type(detailed_feedback)}")
-                
-                comprehensive_feedback_parts.append(f"**Q{q_num}**: {q_text}")
-                
-                # FIXED: Use the correct score from EvaluationResult and fix max_score
-                max_q_score = q_eval.get('max_score', 10)  # Use max_score from EvaluationResult
-                
-                # Ensure max_q_score is never None
-                if max_q_score is None:
-                    max_q_score = 10.0
-                else:
-                    try:
-                        max_q_score = float(max_q_score)
-                    except (ValueError, TypeError):
-                        max_q_score = 10.0
-                
-                # Add current score to running totals
-                score_value += current_q_score
-                max_score_value += max_q_score
-                
-                logger.info(f"📋 Q{q_num} SCORE: {current_q_score:.1f}/{max_q_score}")
-                comprehensive_feedback_parts.append(f"Score: {current_q_score:.1f}/{max_q_score}")
-                
-                # FIXED: Extract dimensional scores from detailed_feedback
-                if detailed_feedback and isinstance(detailed_feedback, dict):
-                    # The detailed_feedback contains the analysis structure with dimensional_scores
-                    if "dimensional_scores" in detailed_feedback:
-                        dim_scores = detailed_feedback["dimensional_scores"]
-                        logger.info(f"🔎 DEBUG: EARLY PATH - Found dimensional_scores for Q{q_num}: {len(dim_scores) if dim_scores else 0} dimensions")
-                        logger.info(f"🔎 DEBUG: EARLY PATH - Dimensional scores structure: {list(dim_scores.keys()) if isinstance(dim_scores, dict) else type(dim_scores)}")
-                        
-                        # Add detailed dimensional analysis to feedback
-                        comprehensive_feedback_parts.append("📊 **13-Dimensional Analysis:**")
-                        
-                        # Process all available dimensional scores
-                        dimension_totals = {
-                            'content': 0, 'structure': 0, 'presentation': 0, 
-                            'analytical': 0, 'factual': 0
-                        }
-                        dimension_counts = {
-                            'content': 0, 'structure': 0, 'presentation': 0,
-                            'analytical': 0, 'factual': 0
-                        }
-                        
-                        # Process each dimensional score
-                        for dim_name, dim_data in dim_scores.items():
-                            if isinstance(dim_data, dict) and 'score' in dim_data:
-                                score_str = dim_data.get('score', '0/10')
-                                feedback_text = dim_data.get('feedback', 'No feedback')
-                                
-                                # Extract numeric score with defensive programming
-                                dim_score = 0
-                                max_dim_score = 10  # Default max score
-                                
-                                if "/" in str(score_str):
-                                    try:
-                                        score_parts = str(score_str).split("/")
-                                        # Handle non-numeric values like "N/A", "N/10"
-                                        score_part = score_parts[0].strip()
-                                        max_part = score_parts[1].strip()
-                                        
-                                        # Try to convert score part
-                                        if score_part.lower() in ['n', 'na', 'n/a', 'null', 'none', '']:
-                                            dim_score = 0.0
-                                        else:
-                                            dim_score = float(score_part)
-                                        
-                                        # Try to convert max part
-                                        if max_part.lower() in ['n', 'na', 'n/a', 'null', 'none', '']:
-                                            max_dim_score = 10.0
-                                        else:
-                                            max_dim_score = float(max_part)
-                                            
-                                    except (ValueError, IndexError) as e:
-                                        logger.warning(f"🔧 Could not parse dimensional score '{score_str}' for {dim_name}: {e}")
-                                        dim_score = 0.0
-                                        max_dim_score = 10.0
-                                
-                                # Add to feedback with proper formatting - format scores to 1 decimal
-                                dim_display = dim_name.replace('_', ' ').title()
-                                formatted_score = f"{dim_score:.1f}/{max_dim_score:.0f}" if "/" in str(score_str) else str(score_str)
-                                comprehensive_feedback_parts.append(f"  • **{dim_display}**: {formatted_score} - {feedback_text}")
-                                
-                                # Categorize for averaging (map to structure/coverage/tone)
-                                if dim_name in ['content_knowledge', 'factual_accuracy', 'current_affairs']:
-                                    dimension_totals['content'] += dim_score
-                                    dimension_counts['content'] += 1
-                                elif dim_name in ['structure_organization', 'logical_flow', 'answer_completeness']:
-                                    dimension_totals['structure'] += dim_score
-                                    dimension_counts['structure'] += 1
-                                elif dim_name in ['language_expression', 'presentation_quality', 'conclusion_effectiveness']:
-                                    dimension_totals['presentation'] += dim_score
-                                    dimension_counts['presentation'] += 1
-                                elif dim_name in ['analytical_thinking', 'critical_evaluation', 'contemporary_relevance']:
-                                    dimension_totals['analytical'] += dim_score
-                                    dimension_counts['analytical'] += 1
-                                else:
-                                    # Default fallback
-                                    dimension_totals['factual'] += dim_score
-                                    dimension_counts['factual'] += 1
-                        
-                        # Calculate averages for structure, coverage, tone
-                        total_structure_score += (dimension_totals['structure'] / max(dimension_counts['structure'], 1))
-                        total_coverage_score += (dimension_totals['content'] / max(dimension_counts['content'], 1))  
-                        total_tone_score += (dimension_totals['presentation'] / max(dimension_counts['presentation'], 1))
-                        
-                        # Extract strengths and improvements from detailed_feedback
-                        # detailed_feedback itself contains the analysis structure
-                        if "detailed_feedback" in detailed_feedback:
-                            feedback_data = detailed_feedback["detailed_feedback"]
-                            
-                            # Add strengths
-                            if "strengths" in feedback_data:
-                                for strength in feedback_data["strengths"][:2]:  # First 2 strengths per question
-                                    strengths_list.append(f"Q{q_num}: {strength}")
-                            
-                            # Add improvements
-                            if "improvement_suggestions" in feedback_data:
-                                for improvement in feedback_data["improvement_suggestions"][:2]:  # First 2 improvements per question
-                                    improvements_list.append(f"Q{q_num}: {improvement}")
-                
-                # Score accumulation already handled at lines 279-280
-                
-                comprehensive_feedback_parts.append("")
-            
-            if len(question_evaluations) > 10:
-                comprehensive_feedback_parts.append(f"... and {len(question_evaluations) - 10} more questions analyzed")
-                comprehensive_feedback_parts.append("")
-            
-            # Add overall analysis summary
-            score_percentage = (score_value / max_score_value * 100) if max_score_value > 0 else 0
-            comprehensive_feedback_parts.append("🎯 **Overall Performance Analysis:**")
-            comprehensive_feedback_parts.append(f"• Processing Method: {evaluation_results.get('evaluation_method', 'Vision Extraction + Evaluation (Integrated)')}")
-            comprehensive_feedback_parts.append(f"• Performance Level: {score_percentage:.1f}% - {'Excellent' if score_percentage >= 80 else 'Good' if score_percentage >= 60 else 'Needs Improvement'}")
-            comprehensive_feedback_parts.append("")
-            
-            # Add overall strengths and improvements summary (only once, at the end)
-            if strengths_list:
-                comprehensive_feedback_parts.append("💪 **Key Strengths Identified:**")
-                for strength in strengths_list[:5]:  # Top 5 overall strengths
-                    comprehensive_feedback_parts.append(f"• {strength}")
-                comprehensive_feedback_parts.append("")
-                
-            if improvements_list:
-                comprehensive_feedback_parts.append("🎯 **Improvement Recommendations:**")
-                for improvement in improvements_list[:5]:  # Top 5 overall improvements
-                    comprehensive_feedback_parts.append(f"• {improvement}")
-                comprehensive_feedback_parts.append("")
-            
-            
-            # Update the total score line in feedback - format to 1 decimal
-            comprehensive_feedback_parts[1] = f"**Total Score**: {score_value:.1f}/{max_score_value} ({score_percentage:.1f}%)"
-            
-            # Build final feedback
-            comprehensive_feedback = "\n".join(comprehensive_feedback_parts)
-            
-            # Average dimensional scores - format to 1 decimal place
-            num_questions = len(question_evaluations)
-            avg_structure = round(total_structure_score / max(num_questions, 1), 1)
-            avg_coverage = round(total_coverage_score / max(num_questions, 1), 1)
-            avg_tone = round(total_tone_score / max(num_questions, 1), 1)
-            
-            evaluation_data = {
-                "score": round(score_value, 1),  # Round to 1 decimal
-                "max_score": max_score_value,
-                "feedback": comprehensive_feedback,  # Remove character limit to prevent truncation
-                "structure": avg_structure,
-                "coverage": avg_coverage,
-                "tone": avg_tone,
-                "strengths": json.dumps(strengths_list[:20]) if strengths_list else "[]",  # Top 20 strengths
-                "improvements": json.dumps(improvements_list[:20]) if improvements_list else "[]"  # Top 20 improvements
-            }
-            
-            # Create new comprehensive evaluation record
-            new_evaluation = Evaluation(
-                answer_id=answer_id,
-                **evaluation_data
-            )
-            
-            # Add and commit immediately
-            local_db.add(new_evaluation)
-            local_db.commit()
-            local_db.refresh(new_evaluation)
-            
-            evaluation_created = True
-            logger.info(f"✅ SUCCESS: Comprehensive evaluation created with ID: {new_evaluation.id}")
-            logger.info(f"✅ Evaluation contains {len(question_evaluations)} question analyses with dimensional scores")
-            
-            # Verify the evaluation was saved
-            verification = local_db.query(Evaluation).filter(Evaluation.id == new_evaluation.id).first()
-            if verification:
-                logger.info(f"✅ VERIFIED: Evaluation ID {verification.id} exists in database")
-            else:
-                logger.error(f"❌ VERIFICATION FAILED: Could not retrieve evaluation ID {new_evaluation.id}")
-        
         else:
-            logger.error(f"No valid question_evaluations found in results")
-            raise ValueError("No question evaluations generated")
+            # Fallback evaluation
+            fallback_evaluation = Evaluation(
+                answer_id=answer_id,
+                score=0.0,
+                max_score=10.0,
+                feedback="No questions found for topper comparison",
+                structure=0.0,
+                coverage=0.0,
+                tone=0.0,
+                strengths="[]",
+                improvements="[]"
+            )
+            local_db.add(fallback_evaluation)
+            local_db.commit()
+            logger.info(f"Created fallback topper evaluation with ID: {fallback_evaluation.id}")
             
     except Exception as e:
-        logger.error(f"Error in comprehensive_pdf_evaluation: {str(e)}", exc_info=True)
-        
-        # Emergency fallback evaluation creation
-        if not evaluation_created:
-            try:
-                fallback_evaluation = Evaluation(
-                    answer_id=answer_id,
-                    score=0.0,
-                    max_score=30.0,
-                    feedback="PDF processing encountered an issue but system recovered gracefully",
-                    structure=0.0,
-                    coverage=0.0,
-                    tone=0.0,
-                    strengths="System recovery mode",
-                    improvements=f"Error: {str(e)}"
-                )
-                local_db.add(fallback_evaluation)
-                local_db.commit()
-                logger.info(f"Created emergency fallback evaluation with ID: {fallback_evaluation.id}")
-            except Exception as fallback_error:
-                logger.error(f"Failed to create emergency fallback: {fallback_error}")
-    
-    finally:
-        # Send completion signal to trigger frontend auto-refresh
+        logger.error(f"Error creating topper comparison evaluation: {e}")
+        # Create emergency fallback
+        emergency_evaluation = Evaluation(
+            answer_id=answer_id,
+            score=0.0,
+            max_score=10.0,
+            feedback=f"Topper comparison failed: {str(e)}",
+            structure=0.0,
+            coverage=0.0,
+            tone=0.0,
+            strengths="[]",
+            improvements="[]"
+        )
+        local_db.add(emergency_evaluation)
+        local_db.commit()
+
+
+# Add new endpoint for evaluation options
+@router.get("/evaluation-options")
+def get_evaluation_options(
+    current_user: User = Depends(get_current_user)
+):
+    """Get available evaluation options"""
+    return [
+        EvaluationOption(
+            type="dimensional",
+            name="13-Dimensional Analysis",
+            description="Comprehensive evaluation across 13 dimensions including content knowledge, structure, analytical thinking, and presentation quality"
+        ),
+        EvaluationOption(
+            type="topper_comparison", 
+            name="Topper Comparison Analysis",
+            description="Compare your answer with high-scoring topper answers to identify gaps, learn best practices, and get targeted improvement suggestions"
+        )
+    ]
+
+
+# Modified upload endpoint to support evaluation type selection
+@router.post("/upload", response_model=AnswerUploadResponse)
+async def upload_answer_with_evaluation_option(
+    file: UploadFile = File(...),
+    question_id: str = Form(...),
+    evaluation_request: str = Form(default='{"evaluation_type": "dimensional"}'),  # JSON string
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Upload answer with evaluation type selection"""
+    try:
+        # Parse evaluation request
         try:
-            if task_id:
-                # Get task_id from answer if we have one
-                answer = local_db.query(Answer).filter(Answer.id == answer_id).first()
-                if answer and answer.task_id:
-                    task_id = answer.task_id
-                    
-                    # Send completion signal via WebSocket
-                    from app.api.websocket_progress import create_progress_callback
-                    import asyncio
-                    
-                    completion_callback = create_progress_callback(task_id)
-                    completion_data = {
-                        "phase": "completed",
-                        "progress": 100,
-                        "message": "✅ Processing completed successfully! Evaluation ready.",
-                        "details": "PDF processing and evaluation finished",
-                        "estimated_remaining_minutes": 0
-                    }
-                    
-                    # Send completion signal
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        loop.run_until_complete(completion_callback(completion_data))
-                        logger.info(f"📡 Completion signal sent for task_id: {task_id}")
-                    finally:
-                        loop.close()
-        except Exception as completion_error:
-            logger.error(f"Failed to send completion signal: {completion_error}")
+            eval_req = json.loads(evaluation_request)
+            evaluation_type = eval_req.get("evaluation_type", "dimensional")
+        except json.JSONDecodeError:
+            evaluation_type = "dimensional"  # Default fallback
         
-        # Ensure session is properly closed
-        local_db.close()
-        logger.info(f"Background task completed for answer_id={answer_id}")
+        logger.info(f"Upload request with evaluation_type: {evaluation_type}")
+        
+        # Save uploaded file
+        file_path = await save_uploaded_file(file)
+        
+        # Generate task ID for progress tracking
+        task_id = f"pdf_eval_{int(time.time() * 1000)}_{current_user.id}"
+        
+        # Create answer record
+        answer = Answer(
+            user_id=current_user.id,
+            question_id=question_id,
+            content="PDF file uploaded for evaluation",
+            file_path=file_path,
+            task_id=task_id,
+            processing_progress=0.0
+        )
+        
+        db.add(answer)
+        db.commit()
+        db.refresh(answer)
+        
+        logger.info(f"✅ Answer saved successfully: ID={answer.id}, file_path={answer.file_path}")
+        
+        # Don't auto-start evaluation - let users choose evaluation type after upload
+        # The evaluation will be started when user selects an evaluation type via separate endpoints
+        
+        # Create response
+        answer_response = AnswerResponse(
+            id=answer.id,
+            question_id=answer.question_id,
+            content=answer.content,
+            file_path=answer.file_path,
+            file_name=file.filename,
+            uploaded_at=answer.uploaded_at.isoformat()
+        )
+        
+        return AnswerUploadResponse(
+            id=answer.id,
+            message="Answer uploaded successfully. Choose your evaluation type to begin analysis.",
+            answer=answer_response,
+            task_id=None,  # No task_id since evaluation hasn't started yet
+            processing_started=True
+        )
+        
+    except Exception as e:
+        logger.error(f"Upload error: {e}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 
-async def comprehensive_pdf_evaluation_legacy(answer_id: int, file_path: str):
-    """Legacy comprehensive PDF evaluation - REPLACED by synchronous version above"""
-    print(f"DEBUG: comprehensive_pdf_evaluation called with answer_id={answer_id}")
-    logger.info(f"comprehensive_pdf_evaluation called with answer_id={answer_id}")
+# Keep existing upload endpoint for backward compatibility  
+@router.post("/upload-legacy", response_model=AnswerUploadResponse)
+async def upload_answer_legacy(
+    file: UploadFile = File(...),
+    question_id: str = Form(...),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Legacy upload endpoint - uses dimensional evaluation by default"""
+    return await upload_answer_with_evaluation_option(
+        file=file,
+        question_id=question_id,
+        evaluation_request='{"evaluation_type": "dimensional"}',
+        background_tasks=background_tasks,
+        current_user=current_user,
+        db=db
+    )
+
+
+# Helper function to create topper comparison evaluation
+async def create_topper_comparison_evaluation(answer_id: int, file_path: str, db: Session):
+    """Create evaluation using topper comparison approach"""
+    try:
+        from app.services.topper_comparison_service import TopperComparisonService
+        
+        # Initialize topper comparison service
+        topper_service = TopperComparisonService()
+        
+        # Generate topper-based evaluation
+        evaluation_result = await topper_service.generate_topper_based_evaluation(
+            answer_id=answer_id,
+            file_path=file_path,
+            db=db
+        )
+        
+        return evaluation_result
+        
+    except Exception as e:
+        logger.error(f"Error in topper comparison evaluation: {e}")
+        raise
+
+
+# Background task for comprehensive PDF evaluation with dual evaluation support
+def comprehensive_pdf_evaluation(answer_id: int, file_path: str, evaluation_type: str = "dimensional"):
+    """
+    Comprehensive PDF evaluation background task with dual evaluation support
+    
+    Args:
+        answer_id: ID of the uploaded answer
+        file_path: Path to the PDF file
+        evaluation_type: Type of evaluation ("dimensional" or "topper_comparison")
+    """
+    logger.info(f"Starting {evaluation_type} evaluation for answer_id={answer_id}")
     
     # Create a new database session for the background task
     from app.db.database import SessionLocal
     local_db = SessionLocal()
     
-    # CRITICAL: Ensure proper session handling
-    evaluation_created = False
-    
     try:
-        task_id = f"pdf_processing_{answer_id}_{int(time.time() * 1000)}"
-        
-        logger.info(f"Starting comprehensive PDF evaluation for answer {answer_id}")
-        
-        # Ensure file path is absolute and exists
-        if not os.path.isabs(file_path):
-            # If relative path, join with current working directory
-            file_path = os.path.join(os.getcwd(), file_path)
-        
-        # Double-check the file exists
-        if not os.path.exists(file_path):
-            # Try alternative path constructions
-            alternative_paths = [
-                os.path.join(os.getcwd(), "uploads", "answers", os.path.basename(file_path)),
-                os.path.join(os.path.dirname(__file__), "..", "..", "..", file_path),
-                os.path.join(os.path.dirname(__file__), "..", "..", "..", "uploads", "answers", os.path.basename(file_path))
-            ]
-            
-            for alt_path in alternative_paths:
-                if os.path.exists(alt_path):
-                    file_path = alt_path
-                    logger.info(f"Found file at alternative path: {file_path}")
-                    break
-            else:
-                logger.error(f"File not found at any of these paths: {[file_path] + alternative_paths}")
-                raise FileNotFoundError(f"PDF file not found: {file_path}")
-        
-        logger.info(f"Processing file: {file_path}")
-        
-        # Log processing start
-        logger.info("🚀 Initializing PDF processing system...")
-        
-        # Process PDF using the complete vision + evaluation pipeline
-        logger.info("💡 About to call process_vision_pdf_with_evaluation directly...")
-        try:
-            # Import and use the complete evaluation function 
-            from app.utils.vision_pdf_processor import process_vision_pdf_with_evaluation
-            from app.utils.comprehensive_pdf_evaluator import create_comprehensive_pdf_evaluation_v2
-
-            # LangGraph workflow support (new)
+        if evaluation_type == "topper_comparison":
+            # Use topper comparison evaluation
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             try:
-                from app.workflows import langgraph_comprehensive_pdf_evaluation
-                LANGGRAPH_AVAILABLE = True
-                logger.info("✅ LangGraph workflows available")
-            except ImportError as e:
-                LANGGRAPH_AVAILABLE = False
-                logger.warning(f"⚠️ LangGraph not available: {e}")
-
-            # Import workflow configuration
-            from app.core.workflow_config import WorkflowConfig
-            
-            # Determine which workflow to use
-            use_langgraph = LANGGRAPH_AVAILABLE and WorkflowConfig.should_use_langgraph(
-                user_id=answer.user_id,
-                force_mode=None  # Could be set via query param for testing
-            )
-            
-            workflow_name = "LangGraph" if use_langgraph else "Legacy"
-            if use_langgraph:
-                logger.info(f"🎯 ============================================")
-                logger.info(f"🎯 🚀 USING LANGGRAPH WORKFLOW 🚀")
-                logger.info(f"🎯 Answer ID: {answer_id}")
-                logger.info(f"🎯 User ID: {answer.user_id}")
-                logger.info(f"🎯 ============================================")
-            else:
-                logger.info(f"🔄 Using {workflow_name} workflow for answer {answer_id}")
-            
-            # Execute chosen workflow
-            if use_langgraph:
-                # LangGraph workflow
-                evaluation_results = await langgraph_comprehensive_pdf_evaluation(
-                    answer_id=answer_id,
-                    file_path=file_path,
-                    content=content,
-                    db_session=local_db,
-                    progress_callback=progress_callback
+                result = loop.run_until_complete(
+                    create_topper_comparison_evaluation(answer_id, file_path, local_db)
                 )
-                logger.info(f"🎯 ============================================")
-                logger.info(f"🎯 ✅ LANGGRAPH EVALUATION COMPLETED ✅")
-                logger.info(f"🎯 Answer ID: {answer_id}")
-                logger.info(f"🎯 ============================================")
-            else:
-                # Legacy workflow
-                evaluation_results = await process_vision_pdf_with_evaluation(
-                    file_path, local_db, answer_id, progress_callback
-                )
-                logger.info(f"✅ Legacy evaluation completed for answer {answer_id}")
-            
-            logger.info(f"💡 process_vision_pdf_with_evaluation returned successfully!")
-            logger.info(f"💡 evaluation_results is None: {evaluation_results is None}")
-            logger.info(f"💡 evaluation_results type: {type(evaluation_results)}")
-            
-            # CRITICAL DEBUG: Deep inspection of evaluation_results
-            if evaluation_results:
-                logger.info(f"💡 evaluation_results keys: {list(evaluation_results.keys())}")
-                logger.info(f"💡 evaluation_results full content (first 500 chars): {str(evaluation_results)[:500]}...")
-                
-                # Check specifically for question_evaluations
-                if 'question_evaluations' in evaluation_results:
-                    qeval = evaluation_results['question_evaluations']
-                    logger.info(f"💡 question_evaluations found! Type: {type(qeval)}, Length: {len(qeval) if qeval else 'None/0'}")
-                    if qeval:
-                        logger.info(f"💡 First question_evaluation keys: {list(qeval[0].keys()) if isinstance(qeval[0], dict) else 'Not a dict'}")
-                else:
-                    logger.info("💡 ❌ NO question_evaluations key found in evaluation_results!")
-                    logger.info(f"💡 Available keys: {list(evaluation_results.keys())}")
-                    
-                    # Check for alternative data structures
-                    if 'evaluation_results' in evaluation_results:
-                        logger.info(f"💡 Found 'evaluation_results' key instead...")
-                        alt_eval = evaluation_results['evaluation_results']
-                        logger.info(f"💡 evaluation_results[evaluation_results] type: {type(alt_eval)}, length: {len(alt_eval) if alt_eval else 'None/0'}")
-            else:
-                logger.info("💡 ❌ evaluation_results is completely None!")
-                
-            # CRITICAL DEBUG: Log exact structure received
-                logger.info(f"💡 🎯 RECEIVED DATA STRUCTURE:")
-                logger.info(f"💡 pdf_filename: {evaluation_results.get('pdf_filename')}")
-                logger.info(f"💡 total_questions_evaluated: {evaluation_results.get('total_questions_evaluated')}")
-                logger.info(f"💡 total_score: {evaluation_results.get('total_score')}")
-                logger.info(f"💡 score_percentage: {evaluation_results.get('score_percentage')}")
-                logger.info(f"💡 evaluation_method: {evaluation_results.get('evaluation_method')}")
-                
-                # Check specifically for question_evaluations
-                if 'question_evaluations' in evaluation_results:
-                    question_evals = evaluation_results['question_evaluations']
-                    logger.info(f"💡 Found question_evaluations - count: {len(question_evals) if question_evals else 0}")
-                    
-                    # Debug: Log details of first evaluation if available
-                    if question_evals and len(question_evals) > 0:
-                        first_eval = question_evals[0]
-                        logger.info(f"💡 First evaluation keys: {list(first_eval.keys()) if isinstance(first_eval, dict) else 'Not a dict'}")
-                        
-                        # Log the actual question data structure
-                        logger.info(f"💡 First evaluation data:")
-                        for key, value in first_eval.items():
-                            if isinstance(value, str):
-                                logger.info(f"💡   {key}: {value[:100]}...")
-                            elif isinstance(value, dict):
-                                logger.info(f"💡   {key}: dict with keys {list(value.keys())}")
-                            elif isinstance(value, list):
-                                logger.info(f"💡   {key}: list with {len(value)} items")
-                            else:
-                                logger.info(f"💡   {key}: {type(value)} = {value}")
-                else:
-                    logger.error("💡 CRITICAL: question_evaluations key not found in returned data!")
-                    logger.error(f"💡 Available keys: {list(evaluation_results.keys())}")
-            
-            logger.info(f"💡 evaluation_results ready for database processing")
-                
-            # FALLBACK: If no evaluation results from vision processing, create basic ones
-            if evaluation_results is None:
-                logger.error("💡 CRITICAL: No evaluation_results from process_vision_pdf_with_evaluation - creating emergency fallback")
-                evaluation_results = {
-                    "pdf_filename": os.path.basename(file_path),
-                    "total_questions_evaluated": 3,  # Default based on common pattern
-                    "total_score": "18/30",
-                    "score_percentage": 60.0,
-                    "evaluation_method": "Emergency Fallback - Vision Processing Completed",
-                    "evaluation_timestamp": time.time(),
-                    "question_evaluations": [
-                        {
-                            "question_number": 1,
-                            "question_text": "PDF Question 1 (Auto-detected)",
-                            "student_answer": "PDF was successfully processed and questions were identified",
-                            "word_limit": 150,
-                            "marks": 10,
-                            "evaluation_timestamp": time.time()
-                        },
-                        {
-                            "question_number": 2,
-                            "question_text": "PDF Question 2 (Auto-detected)", 
-                            "student_answer": "Vision processing completed successfully with question extraction",
-                            "word_limit": 150,
-                            "marks": 10,
-                            "evaluation_timestamp": time.time()
-                        },
-                        {
-                            "question_number": 3,
-                            "question_text": "PDF Question 3 (Auto-detected)",
-                            "student_answer": "Evaluation system functioning properly with fallback mechanism",
-                            "word_limit": 150,
-                            "marks": 10,
-                            "evaluation_timestamp": time.time()
-                        }
-                    ]
-                }
-                logger.info("💡 Created comprehensive emergency fallback evaluation_results")
-            
-        except Exception as eval_error:
-            logger.error(f"💡 EXCEPTION in VisionPDFProcessor: {eval_error}")
-            logger.error(f"💡 EXCEPTION traceback: {traceback.format_exc()}")
-            
-            # EMERGENCY FALLBACK: Create basic evaluation results even on exception
-            evaluation_results = {
-                "pdf_filename": os.path.basename(file_path),
-                "total_questions_evaluated": 1,
-                "total_score": "3/10",
-                "score_percentage": 30.0,
-                "evaluation_method": "Exception Recovery - Basic Processing",
-                "evaluation_timestamp": time.time(),
-                "question_evaluations": [{
-                    "question_number": 1,
-                    "question_text": "PDF Processing Error Recovery",
-                    "student_answer": f"PDF processing encountered an error but was handled gracefully: {str(eval_error)[:200]}",
-                    "word_limit": 150,
-                    "marks": 10,
-                    "evaluation_timestamp": time.time()
-                }]
-            }
-            logger.info("💡 Created exception recovery evaluation_results")
-        
-        # Update status
-        logger.info("💾 Saving evaluation results...")
-        
-        # Debug: Log what we got in detail
-        logger.info(f"DEBUG: evaluation_results type: {type(evaluation_results)}")
-        logger.info(f"DEBUG: evaluation_results is None: {evaluation_results is None}")
-        logger.info(f"DEBUG: evaluation_results keys: {list(evaluation_results.keys()) if evaluation_results else 'None'}")
-        if evaluation_results:
-            for key, value in evaluation_results.items():
-                if isinstance(value, (list, dict)):
-                    logger.info(f"DEBUG: {key}: {type(value)} with {len(value) if hasattr(value, '__len__') else 'N/A'} items")
-                else:
-                    logger.info(f"DEBUG: {key}: {type(value)} = {value}")
-        
-        # Save evaluation results to database - Enhanced checking
-        logger.info(f"DEBUG: Checking if evaluation_results exists and has question_evaluations...")
-        logger.info(f"DEBUG: evaluation_results exists: {evaluation_results is not None}")
-        
-        # Enhanced error handling and data validation
-        if evaluation_results:
-            logger.info(f"DEBUG: evaluation_results type: {type(evaluation_results)}")
-            logger.info(f"DEBUG: evaluation_results keys: {list(evaluation_results.keys()) if isinstance(evaluation_results, dict) else 'Not a dict'}")
-            
-            # First check for question_evaluations
-            question_evaluations = evaluation_results.get('question_evaluations', [])
-            logger.info(f"DEBUG: question_evaluations initial length: {len(question_evaluations)}")
-            
-            # FALLBACK 1: Check if the data is in evaluation_results key as a list
-            if not question_evaluations and 'evaluation_results' in evaluation_results:
-                logger.info("DEBUG: FALLBACK 1 - Trying evaluation_results key...")
-                fallback_results = evaluation_results.get('evaluation_results', [])
-                if isinstance(fallback_results, list) and len(fallback_results) > 0:
-                    # Convert evaluation_results format to question_evaluations format
-                    for eval_item in fallback_results:
-                        if isinstance(eval_item, dict) and 'question_data' in eval_item:
-                            question_evaluations.append(eval_item['question_data'])
-                    logger.info(f"DEBUG: FALLBACK 1 - Extracted {len(question_evaluations)} evaluations from evaluation_results")
-                
-            # FALLBACK 2: Check if questions key contains the evaluations
-            if not question_evaluations and 'questions' in evaluation_results:
-                logger.info("DEBUG: FALLBACK 2 - Trying questions key...")
-                questions_data = evaluation_results.get('questions', [])
-                if isinstance(questions_data, list) and len(questions_data) > 0:
-                    question_evaluations = questions_data
-                    logger.info(f"DEBUG: FALLBACK 2 - Found {len(question_evaluations)} items in questions key")
-            
-            # FALLBACK 3: Check if we have a single question-answer evaluation structure
-            if not question_evaluations:
-                logger.info("DEBUG: FALLBACK 3 - Checking for single evaluation structure...")
-                if evaluation_results.get('total_questions_evaluated', 0) > 0:
-                    # Create a synthetic question evaluation from the overall data
-                    question_evaluations = [{
-                        "question_number": 1,
-                        "question_text": "PDF Analysis",
-                        "student_answer": "PDF content processed successfully",
-                        "evaluation_result": evaluation_results
-                    }]
-                    logger.info(f"DEBUG: FALLBACK 3 - Created {len(question_evaluations)} synthetic evaluations")
-            
-            if question_evaluations and len(question_evaluations) > 0:
-                logger.info(f"DEBUG: ✅ Found {len(question_evaluations)} question evaluations - proceeding with database save...")
-                
-                # Debug: Log the first evaluation structure
-                if len(question_evaluations) > 0:
-                    first_eval = question_evaluations[0]
-                    logger.info(f"📊 DEBUG: First evaluation structure type: {type(first_eval)}")
-                    if isinstance(first_eval, dict):
-                        logger.info(f"📊 DEBUG: First evaluation keys: {list(first_eval.keys())}")
-                        if 'detailed_feedback' in first_eval:
-                            feedback = first_eval['detailed_feedback']
-                            logger.info(f"📊 DEBUG: detailed_feedback type: {type(feedback)}")
-                            if isinstance(feedback, dict):
-                                logger.info(f"📊 DEBUG: detailed_feedback keys: {list(feedback.keys())}")
-                                if 'dimensional_scores' in feedback:
-                                    logger.info(f"📊 DEBUG: dimensional_scores found: {feedback['dimensional_scores']}")
-                                else:
-                                    logger.info(f"📊 DEBUG: No dimensional_scores in detailed_feedback")
-                            else:
-                                logger.info(f"📊 DEBUG: detailed_feedback is not dict: {str(feedback)[:200]}")
-                        else:
-                            logger.info(f"📊 DEBUG: No detailed_feedback in evaluation")
-                    else:
-                        logger.info(f"📊 DEBUG: First evaluation is not dict: {str(first_eval)[:200]}")
-                
-                # Extract summary data from evaluation results or create defaults
-                total_questions = evaluation_results.get("total_questions_evaluated", len(question_evaluations))
-                total_score = evaluation_results.get("total_score", "0/0")
-                
-                # Parse total score if it's in format "x/y"
-                if isinstance(total_score, str) and "/" in total_score:
-                    try:
-                        score_parts = total_score.split("/")
-                        actual_score = float(score_parts[0])
-                        max_score = float(score_parts[1])
-                    except:
-                        actual_score = len(question_evaluations) * 6.0  # Default 6/10 per question
-                        max_score = len(question_evaluations) * 10.0
-                else:
-                    actual_score = len(question_evaluations) * 6.0  # Default 6/10 per question
-                    max_score = len(question_evaluations) * 10.0
-                
-                # Create comprehensive evaluation feedback
-                pdf_filename = evaluation_results.get("pdf_filename", os.path.basename(file_path))
-                score_percentage = (actual_score / max_score * 100) if max_score > 0 else 60.0
-                
-                # Generate detailed feedback from question evaluations
-                feedback_parts = [
-                    f"# 📊 PDF Evaluation Results - {pdf_filename}",
-                    f"",
-                    f"**📈 Overall Performance**: {actual_score:.1f}/{max_score:.0f} ({score_percentage:.1f}%)",
-                    f"**📚 Questions Processed**: {total_questions}",
-                    f"**⚙️ Analysis Method**: Vision-based PDF processing with comprehensive evaluation",
-                    f"",
-                    f"## 📋 Question-wise Analysis:"
-                ]
-                
-                for i, q_eval in enumerate(question_evaluations[:5], 1):  # Show first 5 questions
-                    if isinstance(q_eval, dict):
-                        q_num = q_eval.get('question_number', i)
-                        q_text = str(q_eval.get('question_text', f'Question {q_num}'))[:60] + "..."
-                        answer_text = str(q_eval.get('student_answer', 'Answer processed'))[:100] + "..."
-                        
-                        feedback_parts.extend([
-                            f"",
-                            f"### Q{q_num}: {q_text}",
-                            f"**Answer**: {answer_text}",
-                            f"**Status**: ✅ Successfully evaluated",
-                        ])
-                        
-                        # Add evaluation details if available
-                        if q_eval.get('evaluation_result'):
-                            feedback_parts.append("**Analysis**: Comprehensive evaluation completed")
-                
-                if len(question_evaluations) > 5:
-                    feedback_parts.append(f"\n*... and {len(question_evaluations) - 5} more questions*")
-                
-                feedback_parts.extend([
-                    "",
-                    "---",
-                    "",
-                    "🎯 **Key Achievements**:",
-                    "• PDF successfully processed with vision-based extraction",
-                    "• All questions identified and evaluated",
-                    "• Comprehensive analysis completed",
-                    "",
-                    "🚀 **Next Steps**:",
-                    "• Review individual question feedback",
-                    "• Focus on areas marked for improvement", 
-                    "• Practice similar question types"
-                ])
-                
-                comprehensive_feedback = "\n".join(feedback_parts)
-                
-                # Extract dimensional scores from LangGraph evaluations
-                total_structure_score = 0.0
-                total_coverage_score = 0.0
-                total_tone_score = 0.0
-                valid_evaluations = 0
-                
-                logger.info(f"🔍 DEBUG: Starting dimensional score extraction from {len(question_evaluations)} evaluations")
-                logger.info(f"📊 DEBUG: First few evaluations sample: {question_evaluations[:2] if question_evaluations else 'EMPTY LIST'}")
-                
-                for i, q_eval in enumerate(question_evaluations):
-                    logger.info(f"📋 DEBUG: Evaluation {i+1} type: {type(q_eval)}, keys: {list(q_eval.keys()) if isinstance(q_eval, dict) else 'NOT_DICT'}")
-                    
-                    if isinstance(q_eval, dict) and q_eval.get('detailed_feedback'):
-                        detailed_feedback = q_eval['detailed_feedback']
-                        logger.info(f"📝 DEBUG: detailed_feedback type: {type(detailed_feedback)}, keys: {list(detailed_feedback.keys()) if isinstance(detailed_feedback, dict) else 'NOT_DICT'}")
-                        
-                        # Extract dimensional scores if available
-                        if isinstance(detailed_feedback, dict):
-                            dimensions = detailed_feedback.get('dimensional_scores', {})
-                            if dimensions:
-                                structure_score = dimensions.get('Structure', {}).get('score', 0)
-                                coverage_score = dimensions.get('Coverage', {}).get('score', 0)
-                                tone_score = dimensions.get('Tone_and_Language', {}).get('score', 0)
-                                
-                                # Convert string scores like "7/10" to float
-                                def parse_score(score_str):
-                                    try:
-                                        if isinstance(score_str, (int, float)):
-                                            return float(score_str)
-                                        elif isinstance(score_str, str) and '/' in score_str:
-                                            return float(score_str.split('/')[0])
-                                        return 0.0
-                                    except:
-                                        return 0.0
-                                
-                                total_structure_score += parse_score(structure_score)
-                                total_coverage_score += parse_score(coverage_score)
-                                total_tone_score += parse_score(tone_score)
-                                valid_evaluations += 1
-                
-                # Calculate average dimensional scores, fallback to calculated scores
-                if valid_evaluations > 0:
-                    avg_structure = total_structure_score / valid_evaluations
-                    avg_coverage = total_coverage_score / valid_evaluations
-                    avg_tone = total_tone_score / valid_evaluations
-                else:
-                    # Fallback to percentage-based scores
-                    avg_structure = min(8.0, score_percentage / 10)
-                    avg_coverage = min(8.0, score_percentage / 10)
-                    avg_tone = min(8.0, score_percentage / 10)
-                
-                logger.info(f"📊 Dimensional scores extracted: Structure={avg_structure:.1f}, Coverage={avg_coverage:.1f}, Tone={avg_tone:.1f}")
-                
-                # Create evaluation record
-                evaluation_data = AnswerEvaluationCreate(
-                    score=actual_score,
-                    max_score=max_score,
-                    feedback=comprehensive_feedback,
-                    strengths=str([
-                        "PDF successfully processed with vision extraction",
-                        f"All {total_questions} questions evaluated",
-                        f"Overall performance: {score_percentage:.1f}%",
-                        "Comprehensive analysis methodology applied"
-                    ]),
-                    improvements=str([
-                        "Review detailed question-specific feedback",
-                        "Focus on content depth and structure",
-                        "Enhance presentation and clarity",
-                        "Practice similar question patterns"
-                    ]),
-                    structure=avg_structure,
-                    coverage=avg_coverage,
-                    tone=avg_tone
-                )
-                
-                # Save to database using CRUD with local database session
-                from app.crud.answer import create_answer_evaluation
-                create_answer_evaluation(local_db, evaluation_data, answer_id)
-                
-                logger.info(f"✅ Comprehensive PDF evaluation completed for answer {answer_id}")
-                logger.info("✅ Processing completed successfully!")
-                
-            elif not question_evaluations:
-                logger.error(f"❌ Empty question_evaluations list for answer {answer_id}")
-                logger.error(f"DEBUG: evaluation_results structure: {type(evaluation_results)}")
-                logger.error(f"DEBUG: evaluation_results keys: {list(evaluation_results.keys()) if isinstance(evaluation_results, dict) else 'Not a dict'}")
-                
-                # Detailed debugging of the structure
-                if isinstance(evaluation_results, dict):
-                    for key, value in evaluation_results.items():
-                        value_type = type(value)
-                        if isinstance(value, (list, dict)):
-                            value_info = f"{value_type.__name__} with {len(value) if hasattr(value, '__len__') else 'unknown'} items"
-                        else:
-                            value_info = f"{value_type.__name__}: {str(value)[:50]}..."
-                        logger.error(f"DEBUG:   {key}: {value_info}")
-                
-                # Check what caused the empty list
-                if evaluation_results.get('total_questions_evaluated', 0) == 0:
-                    logger.error("DEBUG: total_questions_evaluated is 0 - no questions were processed")
-                else:
-                    logger.error("DEBUG: question_evaluations key is missing or empty despite having questions")
-                
-                # EMERGENCY FALLBACK: Create a comprehensive evaluation record based on available data
-                logger.info("DEBUG: Creating comprehensive emergency fallback evaluation record...")
-                
-                pdf_filename = evaluation_results.get("pdf_filename", os.path.basename(file_path))
-                total_questions = max(evaluation_results.get("total_questions_evaluated", 1), 1)
-                processing_method = evaluation_results.get("evaluation_method", "Vision-based PDF Processing")
-                
-                # Create detailed feedback explaining the situation
-                emergency_feedback = f"""# 📊 PDF Processing Results - {pdf_filename}
-
-## ✅ Processing Status: Completed Successfully
-
-**📈 Overall Status**: PDF processed and analyzed
-**📚 Questions Detected**: {total_questions} questions identified
-**⚙️ Processing Method**: {processing_method}
-**📅 Processed At**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-## 🔧 Processing Details
-
-The PDF was successfully processed using our advanced vision-based extraction system. All content was analyzed and evaluated, though the detailed question breakdown encountered a data structure formatting issue.
-
-### ✅ What Was Completed:
-• PDF content successfully extracted
-• Question identification completed  
-• Vision-based analysis performed
-• Content evaluation processing finished
-
-### 📋 Next Steps:
-• Manual review of detailed results available
-• Individual question analysis can be provided
-• Re-processing available if needed
-
----
-
-**Note**: This evaluation represents successful PDF processing. For detailed question-by-question analysis, please contact support or re-upload the document."""
-                
-                evaluation_data = AnswerEvaluationCreate(
-                    score=total_questions * 6.5,  # Reasonable default score
-                    max_score=total_questions * 10.0,
-                    feedback=emergency_feedback,
-                    strengths=str([
-                        f"PDF '{pdf_filename}' successfully processed",
-                        f"{total_questions} questions identified and analyzed",
-                        "Vision-based content extraction completed",
-                        "Advanced processing pipeline executed successfully"
-                    ]),
-                    improvements=str([
-                        "Detailed question breakdown can be provided separately",
-                        "Consider re-uploading for enhanced detailed analysis", 
-                        "Manual review of specific sections available",
-                        "Contact support for comprehensive question-wise feedback"
-                    ]),
-                    structure=7.0,  # Good default scores
-                    coverage=6.5,
-                    tone=7.5
-                )
-                
-                from app.crud.answer import create_answer_evaluation
-                create_answer_evaluation(local_db, evaluation_data, answer_id)
-                logger.info("DEBUG: Emergency fallback evaluation record created")
-                
-            else:
-                logger.error(f"❌ question_evaluations exists but has 0 length for answer {answer_id}")
+                logger.info(f"✅ Topper comparison evaluation completed for answer_id={answer_id}")
+            finally:
+                loop.close()
         else:
-            logger.error(f"❌ evaluation_results is None for answer {answer_id}")
-            logger.error("DEBUG: process_vision_pdf_with_evaluation returned None - check PDF processing")
+            # Use traditional dimensional evaluation
+            from app.utils.vision_pdf_processor import process_vision_pdf_with_evaluation
+            
+            result = process_vision_pdf_with_evaluation(
+                file_path=file_path,
+                answer_id=answer_id,
+                db=local_db
+            )
+            logger.info(f"✅ Dimensional evaluation completed for answer_id={answer_id}")
             
     except Exception as e:
-        logger.error(f"❌ Error in comprehensive PDF evaluation: {e}")
-        logger.error(f"❌ Full traceback: {traceback.format_exc()}")
-        logger.info(f"❌ Processing failed: {str(e)}")
-        
-        # ABSOLUTE EMERGENCY FALLBACK: Create a minimal evaluation record even on complete failure
+        logger.error(f"Error in {evaluation_type} evaluation: {e}")
+        # Create fallback evaluation
         try:
-            logger.error(f"🆘 ABSOLUTE EMERGENCY: Creating minimal evaluation record for answer {answer_id}")
-            from app.crud.answer import create_answer_evaluation
-            emergency_evaluation_data = AnswerEvaluationCreate(
-                score=15.0,
+            from app.models.answer import AnswerEvaluation
+            fallback_evaluation = AnswerEvaluation(
+                answer_id=answer_id,
+                score=0.0,
                 max_score=30.0,
-                feedback=f"# Emergency Evaluation Record\n\nPDF processing encountered technical difficulties but was handled gracefully.\n\n**File**: {os.path.basename(file_path) if file_path else 'PDF Document'}\n**Status**: Successfully uploaded and queued for processing\n**Score**: 15/30 (Emergency baseline score)\n\n## Processing Notes\n- PDF upload completed successfully\n- Content extraction initiated\n- Emergency evaluation system activated\n- Manual review recommended for detailed feedback\n\n## Next Steps\n- Re-upload document if detailed analysis needed\n- Contact support for manual evaluation assistance\n- Score reflects successful upload and basic processing",
-                strengths=str([
-                    "PDF document successfully uploaded",
-                    "Emergency processing system activated",
-                    "Data preserved for manual review"
-                ]),
-                improvements=str([
-                    "Re-upload for enhanced processing",
-                    "Contact support for detailed analysis",
-                    "Manual evaluation available on request"
-                ]),
-                structure=5.0,
-                coverage=5.0,
-                tone=5.0
+                feedback=f"Evaluation failed: {str(e)}",
+                structure=0.0,
+                coverage=0.0,
+                tone=0.0,
+                strengths="[]",
+                improvements="[]"
             )
-            create_answer_evaluation(local_db, emergency_evaluation_data, answer_id)
+            local_db.add(fallback_evaluation)
             local_db.commit()
-            logger.error(f"🆘 ABSOLUTE EMERGENCY: Created minimal evaluation record for answer {answer_id}")
-        except Exception as emergency_error:
-            logger.error(f"🆘 ABSOLUTE EMERGENCY FAILED: Could not create minimal evaluation: {emergency_error}")
-            
+            logger.info(f"Created fallback evaluation for answer_id={answer_id}")
+        except Exception as fallback_error:
+            logger.error(f"Failed to create fallback evaluation: {fallback_error}")
+    
     finally:
-        # Always close the local database session
         local_db.close()
-        
-        # FINAL CHECK: Verify evaluation was created
-        try:
-            final_check_db = SessionLocal()
-            # Already imported Answer as alias
-            answer_check = final_check_db.query(Answer).filter(Answer.id == answer_id).first()
-            if answer_check and answer_check.evaluation:
-                logger.info(f"✅ FINAL VERIFICATION: Evaluation exists for answer {answer_id}")
-            else:
-                logger.error(f"🚨 FINAL VERIFICATION FAILED: No evaluation results found for answer {answer_id}")
-            final_check_db.close()
-        except Exception as final_error:
-            logger.error(f"🚨 FINAL VERIFICATION ERROR: {final_error}")
+        logger.info(f"Background task completed for answer_id={answer_id}")
 
-# API Endpoints
-@router.post("/upload", response_model=AnswerUploadResponse)
-async def upload_answer(
-    background_tasks: BackgroundTasks,
-    question_id: str = Form(...),
-    content: Optional[str] = Form(None),  # Made optional for PDF uploads
-    file: Optional[UploadFile] = File(None),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-    llm_service: LLMService = Depends(get_llm_service)
-):
-    """Upload an answer with optional file attachment"""
-    try:
-        # Validate that either content or file is provided
-        if not content and not file:
-            raise HTTPException(
-                status_code=400, 
-                detail="Either content or file must be provided"
-            )
-        
-        # For PDF uploads, content can be extracted from the file
-        final_content = content if content else "Content will be extracted from uploaded file"
-        
-        # Save file if provided
-        file_path = None
-        if file:
-            file_path = await save_uploaded_file(file)
-        
-        # Create answer record
-        answer_data = AnswerCreate(
-            question_id=question_id,
-            content=final_content,
-            file_path=file_path
-        )
-        
-        # Save to database
-        from app.crud.answer import create_answer
-        answer = create_answer(
-            db=db, 
-            answer=answer_data, 
-            user_id=current_user.id
-        )
-        
-        logger.info(f"Answer created with ID: {answer.id}")
-        
-        # Generate task_id for PDF processing progress tracking
-        task_id = None
-        if file_path and file_path.endswith('.pdf'):
-            import uuid
-            task_id = f"pdf_eval_{answer.id}_{uuid.uuid4().hex[:8]}"
-            
-            # Store task_id in answer for the background task to use
-            answer.task_id = task_id
-            db.commit()
-            
-            # Start background processing
-            background_tasks.add_task(
-                comprehensive_pdf_evaluation,
-                answer.id,
-                file_path
-            )
-            logger.info(f"Started background PDF processing for answer {answer.id} with task_id {task_id}")
-        
-        # Ensure the `answer` field is included in the response
-        return AnswerUploadResponse(
-            id=answer.id,
-            message="Answer uploaded successfully" + (" and processing started" if file_path else ""),
-            task_id=task_id,
-            processing_started=bool(file_path and file_path.endswith('.pdf')),
-            answer=AnswerResponse(
-                id=answer.id,
-                question_id=answer.question_id,
-                content=answer.content,
-                file_path=answer.file_path,
-                file_name=file.filename if file else None,
-                uploaded_at=answer.uploaded_at.isoformat(),
-                evaluation=None
-            )
-        )
-        
-    except Exception as e:
-        logger.error(f"NEW_VERSION_UPLOAD_ERROR: {e}")
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
-@router.get("/me")
-def get_my_answers(
+# Get available evaluation options
+@router.get("/evaluation-options", response_model=List[EvaluationOption])
+async def get_evaluation_options():
+    """Get available evaluation options for answer evaluation"""
+    return [
+        EvaluationOption(
+            type="dimensional",
+            name="13-Dimensional Analysis",
+            description="Comprehensive evaluation across 13 dimensions including content knowledge, structure, analytical thinking, and presentation quality"
+        ),
+        EvaluationOption(
+            type="topper_comparison", 
+            name="Topper Comparison Analysis",
+            description="Compare your answer against high-scoring topper answers to identify gaps, improvements, and learn from best practices"
+        )
+    ]
+
+
+# Existing endpoints continue below...
+
+
+@router.get("/{answer_id}/evaluation")
+async def get_answer_evaluation(
+    answer_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get all answers for the current user"""
-    print(f"🔍 DEBUG: get_my_answers called for user {current_user.id}")
-    
-    answers = db.query(Answer).filter(
+    """Get evaluation for a specific answer"""
+    # Check if answer belongs to current user
+    answer = db.query(Answer).filter(
+        Answer.id == answer_id,
         Answer.user_id == current_user.id
-    ).order_by(Answer.uploaded_at.desc()).all()
+    ).first()
+    
+    if not answer:
+        raise HTTPException(status_code=404, detail="Answer not found")
+    
+    # Get evaluation
+    evaluation = db.query(Evaluation).filter(Evaluation.answer_id == answer_id).first()
+    
+    if not evaluation:
+        raise HTTPException(status_code=404, detail="Evaluation not found")
+    
+    return evaluation
+
+
+@router.get("/me")
+async def get_my_answers(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get all answers for the current user with their evaluations"""
+    answers = db.query(Answer).filter(Answer.user_id == current_user.id).order_by(Answer.uploaded_at.desc()).all()
+    logger.info(f"📋 Found {len(answers)} answers for user {current_user.id}")
     
     result = []
     for answer in answers:
-        logger.debug(f"Processing answer {answer.id}, has evaluation: {answer.evaluation is not None}")
-        logger.debug(f"Answer {answer.id} - question_id: {answer.question_id}, content: {answer.content is not None}")
+        evaluation = db.query(Evaluation).filter(Evaluation.answer_id == answer.id).first()
         
-        # Handle None values for required fields (for legacy compatibility)
-        question_id = answer.question_id if answer.question_id is not None else "pdf_upload"
-        content = answer.content if answer.content is not None else "PDF file uploaded"
+        # Convert evaluation to proper format or None
+        evaluation_data = None
+        if evaluation:
+            evaluation_data = {
+                "id": evaluation.id,
+                "answer_id": evaluation.answer_id,
+                "score": evaluation.score,
+                "max_score": evaluation.max_score,
+                "feedback": evaluation.feedback,
+                "strengths": evaluation.strengths,
+                "improvements": evaluation.improvements,
+                "structure": evaluation.structure,
+                "coverage": evaluation.coverage,
+                "tone": evaluation.tone,
+                "evaluated_at": evaluation.evaluated_at.isoformat() if evaluation.evaluated_at else None
+            }
+            
+            # Parse and include actionable data if available
+            if hasattr(evaluation, 'actionable_data') and evaluation.actionable_data:
+                try:
+                    actionable = json.loads(evaluation.actionable_data)
+                    # Merge actionable fields into evaluation_data for frontend
+                    if actionable.get('questions') and len(actionable['questions']) > 0:
+                        # Get first question's actionable data for summary display
+                        first_q = actionable['questions'][0]
+                        evaluation_data.update({
+                            "detected_subject": first_q.get('detected_subject'),
+                            "demand_analysis": first_q.get('demand_analysis'),
+                            "structure_analysis": first_q.get('structure'),
+                            "content_quality": first_q.get('content_quality'),
+                            "examples": first_q.get('examples'),
+                            "diagram_suggestion": first_q.get('diagram_suggestion'),
+                            "value_additions": first_q.get('value_additions'),
+                            "presentation": first_q.get('presentation'),
+                            "overall_score": first_q.get('overall_score') or evaluation.score,
+                            "quick_verdict": first_q.get('quick_verdict'),
+                            "top_3_improvements": first_q.get('top_3_improvements'),
+                            "dimensional_scores": first_q.get('dimensional_scores'),
+                            # Include all questions for multi-question PDFs
+                            "all_questions": actionable.get('questions', [])
+                        })
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse actionable_data: {e}")
         
-        # Create safe filename
-        file_name = None
-        if answer.file_path:
-            try:
-                file_name = answer.file_path.split('/')[-1]
-            except (AttributeError, IndexError):
-                file_name = "uploaded_file"
-        
-        # Create base answer response using AnswerResponse schema with aliases
-        answer_response = AnswerResponse(
-            id=answer.id,
-            question_id=question_id,
-            content=content,
-            file_path=answer.file_path,
-            file_name=file_name,
-            uploaded_at=answer.uploaded_at.isoformat(),
-            evaluation=None
-        )
-        
-        # Convert to dict with aliases (camelCase)
-        answer_data = answer_response.model_dump(by_alias=True)
-
-        # Get the LATEST evaluation for this answer (not just the first one)
-        latest_evaluation = db.query(Evaluation).filter(
-            Evaluation.answer_id == answer.id
-        ).order_by(Evaluation.id.desc()).first()
-        
-        # Manually handle evaluation to ensure proper JSON parsing  
-        if latest_evaluation:
-            try:
-                logger.debug(f"Creating evaluation schema for answer {answer.id}")
-                
-                # Parse the JSON strings directly to lists
-                strengths = latest_evaluation.strengths
-                improvements = latest_evaluation.improvements
-                
-                # Parse strengths
-                if isinstance(strengths, str):
-                    try:
-                        strengths = json.loads(strengths)
-                    except (json.JSONDecodeError, TypeError):
-                        strengths = [strengths] if strengths else []
-                elif not isinstance(strengths, list):
-                    strengths = []
-                
-                # Parse improvements
-                if isinstance(improvements, str):
-                    try:
-                        improvements = json.loads(improvements)
-                    except (json.JSONDecodeError, TypeError):
-                        improvements = [improvements] if improvements else []
-                elif not isinstance(improvements, list):
-                    improvements = []
-                
-                # Create evaluation using AnswerEvaluationSchema with aliases
-                evaluation_schema = AnswerEvaluationSchema(
-                    id=latest_evaluation.id,
-                    answer_id=latest_evaluation.answer_id,
-                    score=latest_evaluation.score,
-                    max_score=latest_evaluation.max_score,
-                    feedback=latest_evaluation.feedback,
-                    strengths=strengths,  # Already parsed to list
-                    improvements=improvements,  # Already parsed to list
-                    structure=latest_evaluation.structure,
-                    coverage=latest_evaluation.coverage,
-                    tone=latest_evaluation.tone,
-                    evaluated_at=latest_evaluation.evaluated_at.isoformat()
-                )
-                
-                # Convert to dict with aliases (camelCase)
-                answer_data["evaluation"] = evaluation_schema.model_dump(by_alias=True)
-                
-                logger.debug(f"Successfully created evaluation for answer {answer.id}")
-                logger.debug(f"Strengths type: {type(strengths)}, value: {strengths}")
-                logger.debug(f"Improvements type: {type(improvements)}, value: {improvements}")
-            except Exception as e:
-                logger.error(f"Failed to create evaluation schema for answer {answer.id}: {e}")
-                # Set evaluation to None if we can't create it
-                answer_data["evaluation"] = None
-        
+        answer_data = {
+            "id": answer.id,
+            "question_id": answer.question_id,
+            "content": answer.content,
+            "filePath": answer.file_path,  # Frontend expects filePath, not file_path
+            "fileName": answer.file_path.split('/')[-1] if answer.file_path else None,
+            "uploadedAt": answer.uploaded_at.isoformat() if answer.uploaded_at else None,
+            "evaluation": evaluation_data
+        }
         result.append(answer_data)
     
     return result
+
 
 @router.get("/{answer_id}/evaluation", response_model=AnswerEvaluationSchema)
 def get_answer_evaluation(
@@ -1341,6 +1131,159 @@ def get_answer_evaluation(
         tone=answer.evaluation.tone,
         evaluated_at=answer.evaluation.evaluated_at.isoformat()
     )
+
+@router.post("/{answer_id}/evaluate/dimensional")
+async def evaluate_dimensional(
+    answer_id: int,
+    background_tasks: BackgroundTasks,
+    paper_subject: Optional[str] = None,  # Paper-level subject: gs1, gs2, gs3, gs4, anthropology
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Start 13-dimensional AI evaluation for an answer.
+    
+    Args:
+        answer_id: ID of the answer to evaluate
+        paper_subject: Optional paper-level subject override (gs1, gs2, gs3, gs4, anthropology).
+                      If provided, ALL questions in the PDF will use this subject's evaluation rubric.
+                      If not provided, subject will be auto-detected per-question.
+    """
+    # Verify answer ownership
+    answer = db.query(Answer).filter(
+        Answer.id == answer_id,
+        Answer.user_id == current_user.id
+    ).first()
+    
+    if not answer:
+        raise HTTPException(status_code=404, detail="Answer not found")
+    
+    if not answer.file_path or not answer.file_path.endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="Only PDF files can be evaluated")
+    
+    # Check if evaluation already exists
+    existing_evaluation = db.query(Evaluation).filter(
+        Evaluation.answer_id == answer_id
+    ).first()
+    
+    if existing_evaluation:
+        raise HTTPException(status_code=400, detail="Answer already has an evaluation")
+    
+    # Validate paper_subject if provided
+    valid_subjects = ["gs1", "gs2", "gs3", "gs4", "anthropology", None]
+    if paper_subject and paper_subject.lower() not in valid_subjects:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid paper_subject. Must be one of: gs1, gs2, gs3, gs4, anthropology"
+        )
+    
+    # Generate task ID for tracking
+    task_id = f"dimensional_eval_{answer_id}_{uuid.uuid4().hex[:8]}"
+    
+    # Log paper subject setting
+    if paper_subject:
+        logger.info(f"📋 Using paper-level subject override: {paper_subject.upper()}")
+    else:
+        logger.info(f"📋 No paper subject specified - will auto-detect per question")
+    
+    # Start background evaluation with task_id and paper_subject
+    background_tasks.add_task(
+        dimensional_pdf_evaluation,
+        answer_id,
+        answer.file_path,
+        task_id,
+        paper_subject.lower() if paper_subject else None
+    )
+    
+    logger.info(f"Started 13-dimensional evaluation for answer {answer_id}")
+    
+    return {
+        "message": "13-dimensional AI evaluation started",
+        "task_id": task_id,
+        "evaluation_type": "dimensional",
+        "answer_id": answer_id,
+        "paper_subject": paper_subject
+    }
+
+@router.post("/{answer_id}/evaluate/topper-comparison")
+async def evaluate_topper_comparison(
+    answer_id: int,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Start topper comparison evaluation for an answer"""
+    # Verify answer ownership
+    answer = db.query(Answer).filter(
+        Answer.id == answer_id,
+        Answer.user_id == current_user.id
+    ).first()
+    
+    if not answer:
+        raise HTTPException(status_code=404, detail="Answer not found")
+    
+    if not answer.file_path or not answer.file_path.endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="Only PDF files can be evaluated")
+    
+    # Check if evaluation already exists
+    existing_evaluation = db.query(Evaluation).filter(
+        Evaluation.answer_id == answer_id
+    ).first()
+    
+    if existing_evaluation:
+        raise HTTPException(status_code=400, detail="Answer already has an evaluation")
+    
+    # Generate task ID for tracking
+    task_id = f"topper_eval_{answer_id}_{uuid.uuid4().hex[:8]}"
+    
+    # Start background evaluation with task_id
+    background_tasks.add_task(
+        topper_comparison_evaluation,
+        answer_id,
+        answer.file_path,
+        task_id
+    )
+    
+    logger.info(f"Started topper comparison evaluation for answer {answer_id}")
+    
+    return {
+        "message": "Topper comparison evaluation started",
+        "task_id": task_id,
+        "evaluation_type": "topper_comparison",
+        "answer_id": answer_id
+    }
+
+@router.get("/evaluation-options")
+def get_evaluation_options():
+    """Get available evaluation options for students"""
+    return {
+        "options": [
+            {
+                "id": "dimensional",
+                "name": "13-Dimensional AI Analysis",
+                "description": "Comprehensive AI evaluation across 13 key dimensions including structure, coverage, tone, and more",
+                "features": [
+                    "Detailed dimensional scoring",
+                    "AI-powered feedback",
+                    "Comprehensive analysis",
+                    "Improvement suggestions"
+                ],
+                "estimated_time": "2-3 minutes"
+            },
+            {
+                "id": "topper_comparison",
+                "name": "Compare with Toppers",
+                "description": "Compare your answer with high-scoring topper answers using semantic similarity",
+                "features": [
+                    "Topper answer comparison",
+                    "Semantic similarity analysis",
+                    "Best practices identification",
+                    "Gap analysis"
+                ],
+                "estimated_time": "1-2 minutes"
+            }
+        ]
+    }
 
 @router.get("/processing-progress/{task_id}")
 async def get_processing_progress(

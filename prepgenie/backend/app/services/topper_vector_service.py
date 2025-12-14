@@ -54,8 +54,8 @@ class TopperVectorService:
             
         # Initialize model (reuse from main vector service if available)
         try:
-            self.model = SentenceTransformer('all-MiniLM-L6-v2')
-            logger.info("Initialized SentenceTransformer for topper analysis")
+            self.model = SentenceTransformer('BAAI/bge-large-en-v1.5')
+            logger.info("Initialized BGE SentenceTransformer for topper analysis")
         except Exception as e:
             logger.warning(f"Failed to initialize SentenceTransformer for toppers: {e}")
     
@@ -328,8 +328,8 @@ class TopperVectorService:
             # Try to initialize the model if it's not available
             logger.info("Attempting to initialize SentenceTransformer model...")
             try:
-                self.model = SentenceTransformer('all-MiniLM-L6-v2')
-                logger.info("Successfully initialized SentenceTransformer model")
+                self.model = SentenceTransformer('BAAI/bge-large-en-v1.5')
+                logger.info("Successfully initialized BGE SentenceTransformer model")
             except Exception as e:
                 logger.error(f"Failed to initialize SentenceTransformer model: {e}")
                 # Still return empty results if model can't be initialized
@@ -568,7 +568,7 @@ class TopperVectorService:
                 "topper_patterns_count": pattern_count,
                 "collections_loaded": self._connected,
                 "embedding_dimension": self.dimension,
-                "model_name": "all-MiniLM-L6-v2" if self.model else "disabled"
+                "model_name": "BAAI/bge-large-en-v1.5" if self.model else "disabled"
             }
         except Exception as e:
             logger.error(f"Failed to get collection stats: {e}")

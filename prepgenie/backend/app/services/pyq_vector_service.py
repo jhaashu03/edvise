@@ -42,9 +42,8 @@ class PYQVectorService:
         import time
         self._time = time
         
-        # For existing collection, we must match the embedding dimension
-        # The current collection uses 384-dim embeddings from MiniLM
-        self.model_name = "BAAI/bge-large-en-v1.5"  # Keep compatible with existing data
+        # Use BGE model for high-quality embeddings
+        self.model_name = "BAAI/bge-large-en-v1.5"
         self.embedding_dim = 1024
         logger.info(f"🤖 Using embedding model: {self.model_name} (dim: {self.embedding_dim})")
         
@@ -217,7 +216,7 @@ class PYQVectorService:
                 os.environ['TRANSFORMERS_OFFLINE'] = '1'
                 os.environ['HF_HUB_OFFLINE'] = '1'
                 
-                self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
+                self.embedding_model = SentenceTransformer('BAAI/bge-large-en-v1.5', device='cpu')
             
             # Generate embeddings
             embeddings = self.embedding_model.encode(texts, convert_to_numpy=True)
