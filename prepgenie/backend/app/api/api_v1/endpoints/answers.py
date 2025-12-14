@@ -1302,7 +1302,7 @@ async def get_processing_progress(
 @router.post("/{answer_id}/generate-model-answer")
 async def generate_model_answer(
     answer_id: int,
-    question_index: Optional[int] = 0,
+    question_index: Optional[int] = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -1314,7 +1314,8 @@ async def generate_model_answer(
     
     Args:
         answer_id: ID of the answer
-        question_index: Index of question to generate model answer for (for multi-question PDFs)
+        question_index: Index of question to generate model answer for (0-based). 
+                       If None, generates for all questions.
     
     Returns:
         Model answer with improvements applied
@@ -1363,13 +1364,22 @@ async def generate_model_answer(
     if not questions:
         raise HTTPException(status_code=400, detail="No questions found in evaluation data")
     
+    # Validate question_index if specified
+    if question_index is not None:
+        if question_index < 0 or question_index >= len(questions):
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid question_index {question_index}. Valid range: 0-{len(questions)-1}"
+            )
+    
     # Get LLM service
     llm_service = get_llm_service()
     
-    # Generate model answers for all questions
+    # Generate model answers (all or specific question based on question_index)
     model_answers = []
+    questions_to_process = [(question_index, questions[question_index])] if question_index is not None else list(enumerate(questions))
     
-    for q_idx, q_data in enumerate(questions):
+    for q_idx, q_data in questions_to_process:
         question_text = q_data.get("question_text", "")
         # Get student's original answer from stored data
         original_answer = q_data.get("student_answer", "") or q_data.get("original_answer", "") or q_data.get("extracted_answer", "")

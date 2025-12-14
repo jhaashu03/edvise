@@ -75,7 +75,7 @@ class QuestionModelAnswer(BaseModel):
     """Model answer for a single question"""
     question_number: int
     question_text: str
-    original_answer: str
+    original_answer_preview: str  # Preview of original answer (truncated)
     model_answer: str
     improvements_applied: List[str]
     key_additions: List[str]
